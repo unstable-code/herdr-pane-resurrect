@@ -1,93 +1,136 @@
 # herdr-pane-resurrect
 
+**English** | [한국어](README.ko.md)
 
+A [herdr](https://herdr.dev) plugin that brings back the programs that were running in your panes,
+the way [tmux-resurrect](https://github.com/tmux-plugins/tmux-resurrect) does for tmux.
 
-## Getting started
+## Why
 
-To make it easy for you to get started with GitLab, here's a list of recommended next steps.
+herdr already restores a session: the layout, each pane's directory, and — with
+`[session] resume_agents_on_restore` — the agent conversations. What it does not restore is whatever
+was *running* inside those panes. They come back as empty shells.
 
-Already a pro? Just edit this README.md and make it your own. Want to make it easy? [Use the template at the bottom](#editing-this-readme)!
+| After a restart | |
+|---|---|
+| Layout: splits, ratios, tabs, names, focus | restored by herdr |
+| Each pane's directory | restored by herdr |
+| Agent conversations | restored by herdr |
+| **The command running in a pane** | **gone — this plugin** |
+| Scrollback | gone |
 
-## Add your files
+This is the tmux-resurrect half that herdr is missing; nothing here duplicates what herdr already
+does well.
 
-* [Create](https://docs.gitlab.com/user/project/repository/web_editor/#create-a-file) or [upload](https://docs.gitlab.com/user/project/repository/web_editor/#upload-a-file) files
-* [Add files using the command line](https://docs.gitlab.com/topics/git/add_files/#add-files-to-a-git-repository) or push an existing Git repository with the following command:
+## How it works
 
-```
-cd existing_repo
-git remote add origin https://gitlab.gggames.synology.me/peter/herdr-plugins/herdr-pane-resurrect.git
-git branch -M master
-git push -uf origin master
-```
+- **save** records the command running in each pane — the process group leader, so a pipeline is
+  recorded as the one command that was typed rather than as its parts. Two kinds of pane are left
+  out on purpose: panes sitting at a prompt (there is nothing to bring back) and agent panes (herdr
+  resumes those itself, and replaying them would start a second copy of the agent).
+  There is no list of programs to configure the way `@resurrect-processes` has to be: whatever was
+  actually running is what gets written.
+- **restore** replays each record into the pane it belongs to. It only ever writes into a pane that
+  is sitting at a prompt, and it skips a record whose command is already running, so restoring twice
+  starts nothing the second time.
+- A record is keyed by **workspace id + tab number + the pane's position in that tab**. Workspace ids
+  and tab numbers survive a restart (herdr keeps them in `session.json`); pane ids do not — they are
+  handed out afresh. Matching on the tab's *name* alone would not work either: an unnamed tab's label
+  is just its number, so every unnamed tab in a session looks alike.
+- When the restored pane is not in the directory the command was started from, the plugin prepends a
+  `cd` so the command runs where it used to.
+- A small daemon (`bin/autosave`) keeps the snapshot current. Saving at shutdown instead would be the
+  obvious design and it cannot work: logging out of a graphical session terminates the whole process
+  tree at once, so there is no moment left in which a hook could run. On a timer, the worst case is
+  losing the commands started since the last tick. It runs once (`flock`), starts from the
+  `[[startup]]` hook and from any action, and stops when the herdr server does.
+- The daemon never clears the snapshot; only a save you ask for does. Shutdown is otherwise a race it
+  cannot win — the panes' processes and the daemon are killed together, and a tick landing in between
+  would see an empty session and overwrite the snapshot meant to survive it.
 
-## Integrate with your tools
+## Requirements
 
-* [Set up project integrations](https://gitlab.gggames.synology.me/peter/herdr-plugins/herdr-pane-resurrect/-/settings/integrations)
-
-## Collaborate with your team
-
-* [Invite team members and collaborators](https://docs.gitlab.com/user/project/members/)
-* [Create a new merge request](https://docs.gitlab.com/user/project/merge_requests/creating_merge_requests/)
-* [Automatically close issues from merge requests](https://docs.gitlab.com/user/project/issues/managing_issues/#closing-issues-automatically)
-* [Enable merge request approvals](https://docs.gitlab.com/user/project/merge_requests/approvals/)
-* [Set auto-merge](https://docs.gitlab.com/user/project/merge_requests/auto_merge/)
-
-## Test and Deploy
-
-Use the built-in continuous integration in GitLab.
-
-* [Get started with GitLab CI/CD](https://docs.gitlab.com/ci/quick_start/)
-* [Analyze your code for known vulnerabilities with Static Application Security Testing (SAST)](https://docs.gitlab.com/user/application_security/sast/)
-* [Deploy to Kubernetes, Amazon EC2, or Amazon ECS using Auto Deploy](https://docs.gitlab.com/topics/autodevops/requirements/)
-* [Use pull-based deployments for improved Kubernetes management](https://docs.gitlab.com/user/clusters/agent/)
-* [Set up protected environments](https://docs.gitlab.com/ci/environments/protected_environments/)
-
-***
-
-# Editing this README
-
-When you're ready to make this README your own, just edit this file and use the handy template below (or feel free to structure it however you want - this is just a starting point!). Thanks to [makeareadme.com](https://www.makeareadme.com/) for this template.
-
-## Suggestions for a good README
-
-Every project is different, so consider which of these sections apply to yours. The sections used in the template are suggestions for most open source projects. Also keep in mind that while a README can be too long and detailed, too long is better than too short. If you think your README is too long, consider utilizing another form of documentation rather than cutting out information.
-
-## Name
-Choose a self-explaining name for your project.
-
-## Description
-Let people know what your project can do specifically. Provide context and add a link to any reference visitors might be unfamiliar with. A list of Features or a Background subsection can also be added here. If there are alternatives to your project, this is a good place to list differentiating factors.
-
-## Badges
-On some READMEs, you may see small images that convey metadata, such as whether or not all the tests are passing for the project. You can use Shields to add some to your README. Many services also have instructions for adding a badge.
-
-## Visuals
-Depending on what you are making, it can be a good idea to include screenshots or even a video (you'll frequently see GIFs rather than actual videos). Tools like ttygif can help, but check out Asciinema for a more sophisticated method.
+- herdr ≥ 0.9.0 (Linux / macOS)
+- `bash`, `jq`, `flock` (util-linux) on the herdr server's `PATH`
 
 ## Installation
-Within a particular ecosystem, there may be a common way of installing things, such as using Yarn, NuGet, or Homebrew. However, consider the possibility that whoever is reading your README is a novice and would like more guidance. Listing specific steps helps remove ambiguity and gets people to using your project as quickly as possible. If it only runs in a specific context like a particular programming language version or operating system or has dependencies that have to be installed manually, also add a Requirements subsection.
 
-## Usage
-Use examples liberally, and show the expected output if you can. It's helpful to have inline the smallest example of usage that you can demonstrate, while providing links to more sophisticated examples if they are too long to reasonably include in the README.
+```sh
+herdr plugin install unstable-code/herdr-pane-resurrect
+```
 
-## Support
-Tell people where they can go to for help. It can be any combination of an issue tracker, a chat room, an email address, etc.
+For development, link a local clone instead; the working tree is used directly, so `git pull` is the
+update:
 
-## Roadmap
-If you have ideas for releases in the future, it is a good idea to list them in the README.
+```sh
+git clone https://github.com/unstable-code/herdr-pane-resurrect.git
+herdr plugin link ./herdr-pane-resurrect
+```
 
-## Contributing
-State if you are open to contributions and what your requirements are for accepting them.
+Then bind the two actions in `~/.config/herdr/config.toml`. `prefix+ctrl+s` and `prefix+ctrl+r` are
+where tmux-resurrect puts them, and herdr leaves both free:
 
-For people who want to make changes to your project, it's helpful to have some documentation on how to get started. Perhaps there is a script that they should run or some environment variables that they need to set. Make these steps explicit. These instructions could also be useful to your future self.
+```toml
+[[keys.command]]
+key = "prefix+ctrl+s"
+type = "plugin_action"
+command = "unstable-code.herdr-pane-resurrect.save"
+description = "save pane commands"
 
-You can also document commands to lint the code or run tests. These steps help to ensure high code quality and reduce the likelihood that the changes inadvertently break something. Having instructions for running tests is especially helpful if it requires external setup, such as starting a Selenium server for testing in a browser.
+[[keys.command]]
+key = "prefix+ctrl+r"
+type = "plugin_action"
+command = "unstable-code.herdr-pane-resurrect.restore"
+description = "restore pane commands"
+```
 
-## Authors and acknowledgment
-Show your appreciation to those who have contributed to the project.
+Apply with `herdr server reload-config` (or your reload key).
+
+Each action reports a summary as a herdr notification; the per-pane detail goes to
+`herdr plugin log`.
+
+## Configuration
+
+Optional, in `config.toml` inside this plugin's config directory
+(`herdr plugin config-dir unstable-code.herdr-pane-resurrect`):
+
+```toml
+autosave = true   # run the background save daemon
+interval = 60     # seconds between automatic saves
+notify   = true   # show a notification when an action finishes
+exclude  = ""     # command names never saved, space separated: "cargo make"
+```
+
+`exclude` matches the program's base name. Panes sitting at a prompt are already skipped, so this is
+for programs that should not come back — something long and expensive, or something that prompts on
+start.
+
+## Verification
+
+Checked on an isolated herdr 0.9.0 server with three workspaces: `alpha` (a named tab holding two
+panes) plus `beta` and `gamma`, whose tabs are both unnamed and therefore both labelled `1`.
+
+| Case | Result |
+|---|---|
+| `sleep 500`, `bash -c 'sleep 400 \| cat'`, `sleep 300` in `/tmp` | saved with the exact argv of each process group leader; the pipeline recorded as the single command that was typed |
+| Server stopped and started again, all panes idle | all three restored byte-identically, the `/tmp` one back in `/tmp` |
+| Two tabs both labelled `1`, in different workspaces | each command restored into its own workspace |
+| Restore run a second time | `restored 0, already running 3, skipped 0` — nothing started twice |
+| Saved workspace closed before restore | reported as skipped, nothing started elsewhere |
+| Five concurrent `bin/autosave --spawn` | exactly one daemon |
+| A command ended in a pane | snapshot updated within one interval |
+| Server stopped | daemon exited on its own and removed its pid file |
+
+## Limitations
+
+- It restores *programs*, not their state: `nvim file` reopens the file, it does not bring back an
+  unsaved buffer, and a build starts from the beginning. Scrollback is not restored either.
+- Commands started since the last automatic save are not in the snapshot; the `save` action is there
+  for when that matters.
+- A command typed into a shell running inside another shell is recorded as that inner shell's
+  command, which is what was actually running.
+- Agent panes are never recorded, so herdr's own agent resume is the only thing that brings them back.
 
 ## License
-For open source projects, say how it is licensed.
 
-## Project status
-If you have run out of energy or time for your project, put a note at the top of the README saying that development has slowed down or stopped completely. Someone may choose to fork your project or volunteer to step in as a maintainer or owner, allowing your project to keep going. You can also make an explicit request for maintainers.
+[MIT](LICENSE)

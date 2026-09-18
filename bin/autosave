@@ -1,0 +1,69 @@
+#!/usr/bin/env bash
+# Keep the snapshot current, so there is something to restore from even when the session ends
+# without warning.
+#
+# A save triggered by shutdown would be the obvious design, and it does not work: logging out of a
+# graphical session terminates the compositor's whole process tree at once (on Linux the session
+# scope is killed as one cgroup), so there is no moment at which a hook can still run. Saving on a
+# timer means the worst case is losing the commands started since the last tick.
+#
+# Started from the [[startup]] hook as `bin/autosave --spawn`, which detaches this loop and returns
+# immediately: a startup hook that keeps running would hold one of herdr's 32 plugin command slots
+# for the whole session and its output would be captured forever.
+set -u
+
+# shellcheck source=bin/lib.sh
+. "$(dirname "$0")/lib.sh"
+
+interval=$(config_value interval 60)  # seconds between saves
+
+lockfile="$state_dir/autosave.lock"
+pidfile="$state_dir/autosave.pid"
+
+if [ "${1:-}" = "--spawn" ]; then
+    truthy "$(config_value autosave true)" || exit 0
+    command -v jq >/dev/null 2>&1 || exit 0
+    mkdir -p "$state_dir" 2>/dev/null || exit 0
+    setsid "$0" </dev/null >/dev/null 2>&1 &
+    exit 0
+fi
+
+mkdir -p "$state_dir" 2>/dev/null || exit 0
+# Exactly one daemon, even when the startup hook and an action race to spawn one: the lock is held
+# for the daemon's whole life, so a second copy exits immediately. A crashed daemon releases it.
+exec 9>"$lockfile" || exit 0
+flock -n 9 || exit 0
+printf '%s\n' "$$" >"$pidfile"
+trap 'rm -f "$pidfile"' EXIT
+
+# Without a socket there is no server to ask. Fall back to herdr's default path rather than looping
+# forever with nothing to talk to.
+socket=${HERDR_SOCKET_PATH:-$HOME/.config/herdr/herdr.sock}
+unreachable=0
+# A stopped herdr can leave its socket file behind, so the file existing is not proof that the
+# server is alive. Three silent snapshots in a row mean nobody is listening: stop rather than spin.
+max_unreachable=3
+
+while :; do
+    sleep "$interval"
+    # Exit with the server: a leftover daemon would keep saving a session that no longer exists,
+    # overwriting the snapshot that is supposed to survive it.
+    [ -S "$socket" ] || exit 0
+
+    if records=$(collect) && [ -n "$records" ]; then
+        unreachable=0
+    else
+        unreachable=$((unreachable + 1))
+        [ "$unreachable" -ge "$max_unreachable" ] && exit 0
+        continue
+    fi
+
+    # The daemon never clears the snapshot, only a save you ask for does. Shutdown is a race it
+    # cannot win otherwise: the panes' processes and this daemon are killed together, and a tick
+    # landing after the first and before the second would see an empty session and overwrite the
+    # very snapshot that is meant to survive it. The cost is that a session deliberately emptied
+    # keeps its last snapshot until the next manual save.
+    [ "$(jq 'length' <<<"$records" 2>/dev/null || echo 0)" -eq 0 ] && continue
+
+    store "$records" >/dev/null 2>&1 || true
+done

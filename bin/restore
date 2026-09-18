@@ -1,0 +1,148 @@
+#!/usr/bin/env bash
+# Replay the saved commands into the panes herdr restored.
+#
+# This is a manual action on purpose. `herdr pane run` types the command into the pane's shell and
+# presses Enter, so a restore really does start processes; nothing here should happen without being
+# asked for. Save, which only reads, is the half that runs automatically.
+#
+# Nothing is ever started in a pane that is busy: a record whose tab has no idle pane left is
+# skipped and reported, never forced into a pane that is doing something else.
+set -u
+
+# shellcheck source=bin/lib.sh
+. "$(dirname "$0")/lib.sh"
+
+command -v jq >/dev/null 2>&1 || {
+    echo "jq is required" >&2
+    exit 1
+}
+
+[ -f "$state_file" ] || {
+    echo "nothing saved yet: $state_file" >&2
+    echo "run the save action first (or let the autosave daemon run)" >&2
+    exit 1
+}
+
+panes=$("$herdr" pane list 2>/dev/null) || panes=""
+tabs=$("$herdr" tab list 2>/dev/null) || tabs=""
+workspaces=$("$herdr" workspace list 2>/dev/null) || workspaces=""
+[ -n "$panes" ] && [ -n "$tabs" ] && [ -n "$workspaces" ] || {
+    echo "herdr is not answering — is the server running?" >&2
+    exit 1
+}
+
+total=$(jq 'length' "$state_file" 2>/dev/null) || total=0
+used=""
+started=0
+running=0
+skipped=0
+
+for ((i = 0; i < total; i++)); do
+    record=$(jq -c ".[$i]" "$state_file")
+    want_ws=$(jq -r '.ws' <<<"$record")
+    want_ws_label=$(jq -r '.ws_label // ""' <<<"$record")
+    want_tab=$(jq -r '.tab' <<<"$record")
+    want_tab_label=$(jq -r '.tab_label // ""' <<<"$record")
+    want_idx=$(jq -r '.idx // 0' <<<"$record")
+    want_cwd=$(jq -r '.cwd // ""' <<<"$record")
+    want_argv=$(jq -c '.argv' <<<"$record")
+    label=$(record_line "$record")
+
+    # Resolve the workspace by id first — ids survive a restart (session.json keeps them) — and fall
+    # back to its name, which covers a workspace that was closed and made again.
+    ws_id=$(jq -r --arg w "$want_ws" --arg l "$want_ws_label" '
+        .result.workspaces as $all
+        | (($all | map(select(.workspace_id == $w)))
+            + ($all | map(select($l != "" and .label == $l))))
+        | first | .workspace_id // empty' <<<"$workspaces")
+    if [ -z "$ws_id" ]; then
+        echo "  skipped: no workspace $want_ws_label — $label" >&2
+        skipped=$((skipped + 1))
+        continue
+    fi
+
+    # Inside the workspace, match the tab by its number (kept across restarts in
+    # public_tab_numbers), then by its name. Matching on the name alone is not enough: an unnamed
+    # tab's label is just its number, so every unnamed tab in the session looks alike.
+    tab_id=$(jq -r --arg w "$ws_id" --argjson n "$want_tab" --arg l "$want_tab_label" '
+        [.result.tabs[] | select(.workspace_id == $w)] as $t
+        | (($t | map(select(.number == $n))) + ($t | map(select($l != "" and .label == $l))))
+        | first | .tab_id // empty' <<<"$tabs")
+    if [ -z "$tab_id" ]; then
+        echo "  skipped: no tab $want_tab_label in $want_ws_label — $label" >&2
+        skipped=$((skipped + 1))
+        continue
+    fi
+
+    # Candidates: the pane that held this command, then a pane sitting in the same directory, then
+    # the nearest one. Pane ids are handed out afresh on restart, so position is what is left to
+    # match on — and a layout edited since the save should still land close to where it belongs.
+    candidates=$(jq -r --arg t "$tab_id" --arg c "$want_cwd" --argjson w "$want_idx" '
+        [.result.panes[] | select(.tab_id == $t)]
+        | to_entries
+        | sort_by([(.key != $w), (.value.foreground_cwd != $c and .value.cwd != $c),
+                   (if .key - $w < 0 then $w - .key else .key - $w end)])
+        | .[].value.pane_id' <<<"$panes")
+
+    claimed=""
+    idle_pane=""
+    for pane_id in $candidates; do
+        case " $used " in *" $pane_id "*) continue ;; esac
+        info=$("$herdr" pane process-info --pane "$pane_id" 2>/dev/null) || continue
+        # Same leader rule as the save side: the process whose pid is the foreground group id.
+        leader_argv=$(jq -c '.result.process_info
+            | .foreground_process_group_id as $g
+            | (.foreground_processes // []) as $fg
+            | (($fg | map(select(.pid == $g)) | first) // ($fg | first))
+            | .argv // null' <<<"$info")
+        if [ "$(jq -r '.result.process_info.foreground_process_group_id' <<<"$info")" = \
+            "$(jq -r '.result.process_info.shell_pid' <<<"$info")" ]; then
+            [ -z "$idle_pane" ] && idle_pane=$pane_id
+        elif [ "$leader_argv" = "$want_argv" ]; then
+            # Compared as whole argv, not by program name: `watch w` and
+            # `watch 'df -h | grep -v tmpfs'` are both watch and must not be taken for each other.
+            claimed=$pane_id
+            break
+        fi
+    done
+
+    if [ -n "$claimed" ]; then
+        echo "  already running  $label"
+        used="$used $claimed"
+        running=$((running + 1))
+        continue
+    fi
+
+    if [ -z "$idle_pane" ]; then
+        echo "  skipped: no idle pane in $want_ws_label/$want_tab_label — $label" >&2
+        skipped=$((skipped + 1))
+        continue
+    fi
+
+    # `herdr pane run` types the command into the pane's shell, so every word has to survive one
+    # shell round trip: printf %q is what keeps spaces, pipes and quotes from being re-interpreted
+    # there. Without it `watch 'df -h | grep -v tmpfs'` would be split at the pipe.
+    quoted=$(jq -r '.argv[]' <<<"$record" | while IFS= read -r word; do printf '%q ' "$word"; done)
+
+    # The pane comes back in the directory herdr restored, which is the pane's own cwd rather than
+    # the directory the command was started from. Move first when they differ.
+    pane_cwd=$(jq -r --arg p "$idle_pane" \
+        '.result.panes[] | select(.pane_id == $p) | .foreground_cwd // .cwd // ""' <<<"$panes")
+    if [ -n "$want_cwd" ] && [ "$want_cwd" != "$pane_cwd" ]; then
+        quoted="cd $(printf '%q' "$want_cwd") && $quoted"
+    fi
+
+    # shellcheck disable=SC2086  # already escaped above; it has to reach herdr as separate words
+    if "$herdr" pane run "$idle_pane" $quoted >/dev/null 2>&1; then
+        echo "  restored  $label"
+        used="$used $idle_pane"
+        started=$((started + 1))
+    else
+        echo "  failed  $label" >&2
+        skipped=$((skipped + 1))
+    fi
+done
+
+echo "restored $started, already running $running, skipped $skipped"
+notify "Pane commands restored" "$started restored, $running already running, $skipped skipped"
+exit 0

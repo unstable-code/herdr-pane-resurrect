@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+# Record what is running in every pane right now.
+#
+# Runs from the `save` action and from bin/autosave. There is no list of programs to configure, the
+# way tmux-resurrect needs @resurrect-processes: whatever was actually running is what gets written.
+# Two kinds of pane are skipped on purpose:
+#   - panes sitting at a prompt: there is nothing to bring back
+#   - agent panes: herdr resumes those itself ([session] resume_agents_on_restore)
+#
+# Usage: save [--quiet]
+set -u
+
+# shellcheck source=bin/lib.sh
+. "$(dirname "$0")/lib.sh"
+
+quiet=0
+[ "${1:-}" = "--quiet" ] && quiet=1
+
+command -v jq >/dev/null 2>&1 || {
+    echo "jq is required" >&2
+    exit 1
+}
+
+records=$(collect) || {
+    echo "herdr is not answering — is the server running?" >&2
+    exit 1
+}
+
+count=$(jq 'length' <<<"$records")
+
+if [ "$quiet" -eq 0 ]; then
+    while IFS= read -r record; do
+        [ -n "$record" ] || continue
+        echo "  $(record_line "$record")"
+    done < <(jq -c '.[]' <<<"$records")
+fi
+
+store "$records"
+rc=$?
+# 2 means the snapshot is unchanged, which is a success with nothing to write.
+if [ "$rc" -ne 0 ] && [ "$rc" -ne 2 ]; then
+    echo "could not write $state_file" >&2
+    exit 1
+fi
+
+# The daemon says nothing: it saves whenever a command starts or ends, which would be a stream of
+# notifications. Only a save you asked for reports back.
+if [ "$quiet" -eq 0 ]; then
+    echo "saved $count command(s) to $state_file"
+    notify "Pane commands saved" "$count command(s)"
+fi
+
+ensure_autosave
+exit 0
