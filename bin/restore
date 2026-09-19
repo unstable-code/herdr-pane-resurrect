@@ -33,10 +33,10 @@ workspaces=$("$herdr" workspace list 2>/dev/null) || workspaces=""
 
 total=$(jq 'length' "$state_file" 2>/dev/null) || total=0
 used=""
-started=0
-running=0
-skipped=0
-failed=0
+# Counted per kind: a Claude conversation (agent) and a command are different things to bring back,
+# and one total hides how many of each came back.
+declare -A started=([agent]=0 [command]=0) running=([agent]=0 [command]=0)
+declare -A skipped=([agent]=0 [command]=0) failed=([agent]=0 [command]=0)
 launched=()
 
 for ((i = 0; i < total; i++)); do
@@ -49,13 +49,24 @@ for ((i = 0; i < total; i++)); do
     want_cwd=$(jq -r '.cwd // ""' <<<"$record")
     want_argv=$(jq -c '.argv' <<<"$record")
     label=$(record_line "$record")
+    kind="command"
+    [ "$(jq -r '.argv[0:2] | join(" ")' <<<"$record")" = "claude --resume" ] && kind="agent"
 
     # The same rule save applies, applied again here: a snapshot written before a rule existed
     # would otherwise keep replaying what the current version refuses to record.
     if [ "$(jq -r --arg ephemeral "$ephemeral_dirs" --arg exclude "$exclude_names" \
         "$replayable_jq"'.argv | replayable' <<<"$record")" != true ]; then
         echo "  skipped: not replayable (interactive shell or temporary path) — $label" >&2
-        skipped=$((skipped + 1))
+        skipped[$kind]=$((${skipped[$kind]} + 1))
+        continue
+    fi
+
+    # A Claude conversation that is already open anywhere - resumed by hand, from the picker, or by
+    # herdr's own agent resume on a machine where that works - must not be opened a second time.
+    # Checked by conversation id, because the argv of the running copy may be anything.
+    if [ "$kind" = agent ] && claude_session_live "$(jq -r '.argv[2]' <<<"$record")"; then
+        echo "  already running  $label"
+        running[$kind]=$((${running[$kind]} + 1))
         continue
     fi
 
@@ -68,7 +79,7 @@ for ((i = 0; i < total; i++)); do
         | first | .workspace_id // empty' <<<"$workspaces")
     if [ -z "$ws_id" ]; then
         echo "  skipped: no workspace $want_ws_label — $label" >&2
-        skipped=$((skipped + 1))
+        skipped[$kind]=$((${skipped[$kind]} + 1))
         continue
     fi
 
@@ -81,7 +92,7 @@ for ((i = 0; i < total; i++)); do
         | first | .tab_id // empty' <<<"$tabs")
     if [ -z "$tab_id" ]; then
         echo "  skipped: no tab $want_tab_label in $want_ws_label — $label" >&2
-        skipped=$((skipped + 1))
+        skipped[$kind]=$((${skipped[$kind]} + 1))
         continue
     fi
 
@@ -120,13 +131,13 @@ for ((i = 0; i < total; i++)); do
     if [ -n "$claimed" ]; then
         echo "  already running  $label"
         used="$used $claimed"
-        running=$((running + 1))
+        running[$kind]=$((${running[$kind]} + 1))
         continue
     fi
 
     if [ -z "$idle_pane" ]; then
         echo "  skipped: no idle pane in $want_ws_label/$want_tab_label — $label" >&2
-        skipped=$((skipped + 1))
+        skipped[$kind]=$((${skipped[$kind]} + 1))
         continue
     fi
 
@@ -146,10 +157,10 @@ for ((i = 0; i < total; i++)); do
     # shellcheck disable=SC2086  # already escaped above; it has to reach herdr as separate words
     if "$herdr" pane run "$idle_pane" $quoted >/dev/null 2>&1; then
         used="$used $idle_pane"
-        launched+=("$idle_pane"$'\t'"$label")
+        launched+=("$idle_pane"$'\t'"$kind"$'\t'"$label")
     else
         echo "  failed  $label" >&2
-        failed=$((failed + 1))
+        failed[$kind]=$((${failed[$kind]} + 1))
     fi
 done
 
@@ -162,15 +173,17 @@ if [ "${#launched[@]}" -gt 0 ]; then
     sleep "$(config_value verify_delay 1.5)"
     for entry in "${launched[@]}"; do
         pane_id=${entry%%$'\t'*}
-        label=${entry#*$'\t'}
+        rest=${entry#*$'\t'}
+        kind=${rest%%$'\t'*}
+        label=${rest#*$'\t'}
         info=$("$herdr" pane process-info --pane "$pane_id" 2>/dev/null) || info=""
         if [ -n "$info" ] && [ "$(jq -r '.result.process_info.foreground_process_group_id' <<<"$info")" != \
             "$(jq -r '.result.process_info.shell_pid' <<<"$info")" ]; then
             echo "  restored  $label"
-            started=$((started + 1))
+            started[$kind]=$((${started[$kind]} + 1))
         else
             echo "  exited right away (see the pane)  $label" >&2
-            failed=$((failed + 1))
+            failed[$kind]=$((${failed[$kind]} + 1))
         fi
     done
 fi
@@ -180,7 +193,11 @@ fi
 # would only leave autosave off for the rest of the session.
 rm -f "$hold_file"
 
-echo "restored $started, already running $running, skipped $skipped, failed $failed"
-notify "Pane commands restored" \
-    "$started restored, $running already running, $skipped skipped, $failed failed"
+tally() {
+    printf '%s restored, %s already running, %s skipped, %s failed' \
+        "${started[$1]}" "${running[$1]}" "${skipped[$1]}" "${failed[$1]}"
+}
+echo "agent(s):   $(tally agent)"
+echo "command(s): $(tally command)"
+notify "Pane commands restored" "agent(s): $(tally agent) / command(s): $(tally command)"
 exit 0

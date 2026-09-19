@@ -15,7 +15,7 @@ was *running* inside those panes. They come back as empty shells.
 |---|---|
 | Layout: splits, ratios, tabs, names, focus | restored by herdr |
 | Each pane's directory | restored by herdr |
-| Agent conversations | restored by herdr |
+| Agent conversations | restored by herdr — once the agent has reported its session id; Claude panes by this plugin, which does not need that report (see below) |
 | **The command running in a pane** | **gone — this plugin** |
 | Scrollback | gone |
 
@@ -28,7 +28,8 @@ does well.
   recorded as the one command that was typed rather than as its parts. Some panes are left out on
   purpose:
   - panes sitting at a prompt — there is nothing to bring back;
-  - agent panes — herdr resumes those itself, and replaying them would start a second copy;
+  - agent panes other than Claude — herdr resumes those itself, and replaying them would start a
+    second copy;
   - **interactive shells started inside a pane** (`nix-shell`, `sudo -i`, a nested `bash`) — a prompt
     too, just a nested one, and what made the shell is not in its argv. A shell given something to
     run (`bash -c …`, `bash ./deploy.sh`) is a real command and is kept;
@@ -46,6 +47,20 @@ does well.
 - `herdr pane run` succeeding only means the command was *typed*. restore therefore looks at every
   pane again a moment later and counts only what is still running; a command that failed at once
   (its script gone, say) is reported as *exited right away* rather than as restored.
+- **Claude panes come back as their own conversation.** herdr can resume agents itself, but only
+  after the agent has reported its session id, and Claude's report comes from a Claude Code hook
+  that needs `python3` and quietly does nothing without it — so on such a machine herdr resumes no
+  Claude pane at all. Claude Code also keeps a record of every running process in
+  `~/.claude/sessions/<pid>.json` (or under `$CLAUDE_CONFIG_DIR`), session id included; save reads
+  it and records the pane as `claude --resume <id>`, whatever the pane was started with (`claude -r`
+  from the picker leaves no id behind).
+  - `--resume <id>`, not `--continue`: `--continue` opens the newest conversation of the directory,
+    so two Claude panes in one repository would both come back as the same conversation.
+  - That file is Claude Code internals, not an interface. Every step fails closed: no file, an
+    unexpected shape, or a file left by an earlier process that had the same pid (its `procStart`
+    must equal the kernel's start time for the pid) leaves the pane out, as before.
+  - restore skips a conversation that is already open anywhere — resumed by hand, from the picker,
+    or by herdr's own resume on a machine where that works — judged by session id, not by argv.
 - A record is keyed by **workspace id + tab number + the pane's position in that tab**. Workspace ids
   and tab numbers survive a restart (herdr keeps them in `session.json`); pane ids do not — they are
   handed out afresh. Matching on the tab's *name* alone would not work either: an unnamed tab's label
@@ -120,6 +135,7 @@ interval = 60     # seconds between automatic saves
 notify   = true   # show a notification when an action finishes
 exclude  = ""     # command names never saved, space separated: "cargo make"
 verify_delay = 1.5  # seconds restore waits before checking that each command is still running
+claude   = true   # record Claude panes by their conversation (see How it works)
 ```
 
 `exclude` matches the program's base name. Panes sitting at a prompt are already skipped, so this is
@@ -136,7 +152,7 @@ panes) plus `beta` and `gamma`, whose tabs are both unnamed and therefore both l
 | `sleep 500`, `bash -c 'sleep 400 \| cat'`, `sleep 300` in `/tmp` | saved with the exact argv of each process group leader; the pipeline recorded as the single command that was typed |
 | Server stopped and started again, all panes idle | all three restored byte-identically, the `/tmp` one back in `/tmp` |
 | Two tabs both labelled `1`, in different workspaces | each command restored into its own workspace |
-| Restore run a second time | `already running 3`, nothing started twice |
+| Restore run a second time | `command(s): 0 restored, 3 already running` — nothing started twice |
 | Saved workspace closed before restore | reported as skipped, nothing started elsewhere |
 | Five concurrent `bin/autosave --spawn` | exactly one daemon |
 | A command ended in a pane | snapshot updated within one interval |
@@ -146,7 +162,11 @@ panes) plus `beta` and `gamma`, whose tabs are both unnamed and therefore both l
 | save by hand while on hold | hold lifted |
 | A real `nix-shell -p hello` in a pane (leader `bash --rcfile $TMPDIR/nix-shell-…/rc`) | not saved; `bash -c 'sleep 600 \| cat'` next to it still saved |
 | A snapshot from an older version holding that nix-shell record | skipped as *not replayable*, not typed into the pane |
-| `bash /nonexistent/deploy.sh` in the snapshot | typed, failed at once, reported as *exited right away* — `restored 1, skipped 1, failed 1` |
+| `bash /nonexistent/deploy.sh` in the snapshot | typed, failed at once, reported as *exited right away* — `command(s): 1 restored, 0 already running, 1 skipped, 1 failed` |
+| Two Claude panes in the same directory (a stand-in that registers `sessions/<pid>.json` the way Claude Code does) | saved as `claude --resume aaaaaaaa-…` and `claude --resume bbbbbbbb-…` |
+| Hard restart, then restore | each pane got its own conversation back (p1 → `aaaaaaaa-…`, p2 → `bbbbbbbb-…`); the dead processes' session files were not taken for live ones |
+| restore again | `agent(s): 0 restored, 2 already running`, judged by session id |
+| Against the live Claude Code 2.1.278 files | all eight open conversations resolved to their session ids; a wrong `procStart`, a dead pid and a malformed id were all refused |
 
 ## Limitations
 
@@ -156,7 +176,10 @@ panes) plus `beta` and `gamma`, whose tabs are both unnamed and therefore both l
   for when that matters.
 - A command typed into a shell running inside another shell is recorded as that inner shell's
   command, which is what was actually running.
-- Agent panes are never recorded, so herdr's own agent resume is the only thing that brings them back.
+- Agent panes other than Claude are never recorded, so herdr's own agent resume is the only thing
+  that brings them back.
+- The Claude support reads a file Claude Code does not document. If a Claude Code update changes it,
+  Claude panes are quietly left out again — nothing is replayed wrongly, but nothing is replayed.
 
 ## License
 

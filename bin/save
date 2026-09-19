@@ -26,7 +26,11 @@ records=$(collect) || {
     exit 1
 }
 
-count=$(jq 'length' <<<"$records")
+# Claude conversations are counted apart from commands: they are a different kind of thing to
+# bring back, and lumping them together hides how many of each the snapshot holds.
+agents=$(jq '[.[] | select(.argv[0:2] == ["claude", "--resume"])] | length' <<<"$records")
+commands=$(($(jq 'length' <<<"$records") - agents))
+summary="$agents agent(s) and $commands command(s)"
 
 if [ "$quiet" -eq 0 ]; then
     while IFS= read -r record; do
@@ -46,8 +50,8 @@ fi
 # The daemon says nothing: it saves whenever a command starts or ends, which would be a stream of
 # notifications. Only a save you asked for reports back.
 if [ "$quiet" -eq 0 ]; then
-    echo "saved $count command(s) to $state_file"
-    notify "Pane commands saved" "$count command(s)"
+    echo "saved $summary to $state_file"
+    notify "Pane commands saved" "$summary"
     # Saving by hand replaces the snapshot a restart put on hold, which is the way to say "I will not
     # restore that one" - so autosave may track the session again.
     rm -f "$hold_file"

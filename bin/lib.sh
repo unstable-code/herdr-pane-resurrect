@@ -59,26 +59,83 @@ notify() {
     "$herdr" notification show "$1" --body "$2" >/dev/null 2>&1 || true
 }
 
+# Claude panes. herdr can resume an agent conversation itself, but only once the agent has told it
+# the session id, and for Claude that report comes from a Claude Code hook
+# (~/.claude/hooks/herdr-agent-state.sh) that needs python3 and exits silently without it. Where
+# there is no python3 herdr never learns the id and resumes nothing.
+#
+# Claude Code keeps its own record of every running process, <config>/sessions/<pid>.json, with the
+# session id in it - so the id can be read here without any hook. The conversation is replayed as
+# `claude --resume <id>`, not `claude --continue`: --continue opens the newest conversation of the
+# directory, so two Claude panes in the same repository would both come back as the same one.
+#
+# The file is Claude Code internals, not an interface, so every step here fails closed: a missing
+# file, an unexpected shape or a pid that has been reused leaves the pane out, as before this existed.
+claude_dir=${CLAUDE_CONFIG_DIR:-$HOME/.claude}
+claude_resume=$(config_value claude true)
+
+# claude_session_of <pid>: the session id of the live Claude process <pid>, or nothing.
+claude_session_of() {
+    local pid=$1 file stat started recorded id
+    file="$claude_dir/sessions/$pid.json"
+    [ -r "$file" ] || return 1
+    stat=$(cat "/proc/$pid/stat" 2>/dev/null) || return 1
+    # Fields after the command name, which may itself contain spaces or parentheses. The kernel's
+    # start time (field 22) is the 20th of them; Claude records the same value as procStart, so a
+    # file left behind by an earlier process that had this pid does not match.
+    # shellcheck disable=SC2086  # split into fields on purpose
+    set -- ${stat##*") "}
+    started=${20:-}
+    recorded=$(jq -r '.procStart // empty' "$file" 2>/dev/null)
+    [ -n "$started" ] && [ "$started" = "$recorded" ] || return 1
+    id=$(jq -r '.sessionId // empty' "$file" 2>/dev/null)
+    case "$id" in
+        ????????-????-????-????-????????????) printf '%s\n' "$id" ;;
+        *) return 1 ;;
+    esac
+}
+
+# claude_session_live <id>: whether some running Claude process, in any pane or none, already has
+# this conversation open. Restore checks this rather than comparing argv, which would miss the same
+# conversation opened as `claude -r <id>` or from the picker.
+claude_session_live() {
+    local file
+    for file in "$claude_dir"/sessions/*.json; do
+        [ -e "$file" ] || continue
+        [ "$(claude_session_of "$(basename "$file" .json)")" = "$1" ] && return 0
+    done
+    return 1
+}
+
 # A workspace keeps its id across a restart (session.json stores it as "id": "w3"), and so does a
 # tab's number (public_tab_numbers). Pane ids do not — they are handed out afresh — which is why a
 # record is keyed by workspace id + tab number + the pane's position inside that tab.
 #
-# Everything a save needs comes from three list calls plus one process-info per pane. Agent panes are
-# left out entirely: herdr resumes those itself ([session] resume_agents_on_restore), so replaying
-# them would start a second copy of the same agent.
+# Everything a save needs comes from three list calls plus one process-info per pane. Other agent
+# panes are left out entirely: herdr resumes those itself ([session] resume_agents_on_restore), so
+# replaying them would start a second copy of the same agent.
 collect() {
-    local panes tabs workspaces procs pane_id info
+    local panes tabs workspaces procs pane_id agent info leader session
     panes=$("$herdr" pane list 2>/dev/null) || return 1
     tabs=$("$herdr" tab list 2>/dev/null) || return 1
     workspaces=$("$herdr" workspace list 2>/dev/null) || return 1
     [ -n "$panes" ] && [ -n "$tabs" ] && [ -n "$workspaces" ] || return 1
 
     procs=$(
-        while IFS= read -r pane_id; do
+        while IFS=$'\t' read -r pane_id agent; do
             [ -n "$pane_id" ] || continue
             info=$("$herdr" pane process-info --pane "$pane_id" 2>/dev/null) || continue
-            jq -c '.result.process_info' <<<"$info" 2>/dev/null
-        done < <(jq -r '.result.panes[] | select(has("agent") | not) | .pane_id' <<<"$panes") | jq -s -c .
+            if [ "$agent" = claude ]; then
+                truthy "$claude_resume" || continue
+                leader=$(jq -r '.result.process_info.foreground_process_group_id // empty' <<<"$info")
+                session=$(claude_session_of "$leader") || continue
+                jq -c --arg session "$session" '.result.process_info + {claude_session: $session}' \
+                    <<<"$info" 2>/dev/null
+            else
+                jq -c '.result.process_info' <<<"$info" 2>/dev/null
+            fi
+        done < <(jq -r '.result.panes[] | select((has("agent") | not) or .agent == "claude")
+                    | "\(.pane_id)\t\(.agent // "")"' <<<"$panes") | jq -s -c .
     )
     [ -n "$procs" ] || return 1
 
@@ -118,7 +175,10 @@ collect() {
                 tab_label: ($tab.label // ""),
                 idx: ([$panes[] | select(.tab_id == $pane.tab_id) | .pane_id] | index($pane.pane_id) // 0),
                 cwd: ($leader.cwd // $pane.foreground_cwd // $pane.cwd // ""),
-                argv: $leader.argv,
+                # A Claude pane is recorded by its conversation, whatever it was started with
+                # (`claude -r` with the picker leaves no id in the argv).
+                argv: (if $p.claude_session then ["claude", "--resume", $p.claude_session]
+                       else $leader.argv end),
               } ]
         | sort_by([.ws, .tab, .idx])'
 }
