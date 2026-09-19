@@ -48,6 +48,9 @@ fi
 if [ "$quiet" -eq 0 ]; then
     echo "saved $count command(s) to $state_file"
     notify "Pane commands saved" "$count command(s)"
+    # Saving by hand replaces the snapshot a restart put on hold, which is the way to say "I will not
+    # restore that one" - so autosave may track the session again.
+    rm -f "$hold_file"
 fi
 
 ensure_autosave

@@ -7,9 +7,16 @@
 # scope is killed as one cgroup), so there is no moment at which a hook can still run. Saving on a
 # timer means the worst case is losing the commands started since the last tick.
 #
-# Started from the [[startup]] hook as `bin/autosave --spawn`, which detaches this loop and returns
-# immediately: a startup hook that keeps running would hold one of herdr's 32 plugin command slots
-# for the whole session and its output would be captured forever.
+# Started from the [[startup]] hook as `bin/autosave --spawn --startup`, which detaches this loop and
+# returns immediately: a startup hook that keeps running would hold one of herdr's 32 plugin command
+# slots for the whole session and its output would be captured forever.
+#
+# A server that has just started is exactly the session the snapshot is meant to repair: herdr has
+# brought the layout back as empty shells, so the first tick would record that and overwrite the
+# commands still waiting to be restored. Measured 2026-09-19: Hyprland crashed at 20:11, herdr came
+# back at 20:11:32, and autosave replaced three ssh records with a single stray `bash` at 20:39,
+# before anyone pressed restore. So --startup puts the snapshot on hold, and the daemon writes nothing
+# until restore runs or a save is asked for by hand; both of those lift the hold.
 set -u
 
 # shellcheck source=bin/lib.sh
@@ -24,6 +31,10 @@ if [ "${1:-}" = "--spawn" ]; then
     truthy "$(config_value autosave true)" || exit 0
     command -v jq >/dev/null 2>&1 || exit 0
     mkdir -p "$state_dir" 2>/dev/null || exit 0
+    # Only a snapshot that holds something is worth protecting.
+    if [ "${2:-}" = "--startup" ] && [ "$(jq 'length' "$state_file" 2>/dev/null || echo 0)" -gt 0 ]; then
+        : >"$hold_file"
+    fi
     setsid "$0" </dev/null >/dev/null 2>&1 &
     exit 0
 fi
@@ -64,6 +75,9 @@ while :; do
     # very snapshot that is meant to survive it. The cost is that a session deliberately emptied
     # keeps its last snapshot until the next manual save.
     [ "$(jq 'length' <<<"$records" 2>/dev/null || echo 0)" -eq 0 ] && continue
+
+    # On hold since the server started: the snapshot still waits for its restore.
+    [ -e "$hold_file" ] && continue
 
     store "$records" >/dev/null 2>&1 || true
 done

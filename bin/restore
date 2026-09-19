@@ -36,6 +36,8 @@ used=""
 started=0
 running=0
 skipped=0
+failed=0
+launched=()
 
 for ((i = 0; i < total; i++)); do
     record=$(jq -c ".[$i]" "$state_file")
@@ -47,6 +49,15 @@ for ((i = 0; i < total; i++)); do
     want_cwd=$(jq -r '.cwd // ""' <<<"$record")
     want_argv=$(jq -c '.argv' <<<"$record")
     label=$(record_line "$record")
+
+    # The same rule save applies, applied again here: a snapshot written before a rule existed
+    # would otherwise keep replaying what the current version refuses to record.
+    if [ "$(jq -r --arg ephemeral "$ephemeral_dirs" --arg exclude "$exclude_names" \
+        "$replayable_jq"'.argv | replayable' <<<"$record")" != true ]; then
+        echo "  skipped: not replayable (interactive shell or temporary path) — $label" >&2
+        skipped=$((skipped + 1))
+        continue
+    fi
 
     # Resolve the workspace by id first — ids survive a restart (session.json keeps them) — and fall
     # back to its name, which covers a workspace that was closed and made again.
@@ -134,15 +145,42 @@ for ((i = 0; i < total; i++)); do
 
     # shellcheck disable=SC2086  # already escaped above; it has to reach herdr as separate words
     if "$herdr" pane run "$idle_pane" $quoted >/dev/null 2>&1; then
-        echo "  restored  $label"
         used="$used $idle_pane"
-        started=$((started + 1))
+        launched+=("$idle_pane"$'\t'"$label")
     else
         echo "  failed  $label" >&2
-        skipped=$((skipped + 1))
+        failed=$((failed + 1))
     fi
 done
 
-echo "restored $started, already running $running, skipped $skipped"
-notify "Pane commands restored" "$started restored, $running already running, $skipped skipped"
+# `pane run` succeeding only means the text was typed. Whether the command then kept running is a
+# separate question, and the one that matters: a command whose file is gone (a script deleted since,
+# a temp path) is typed fine, fails at once, and leaves the pane back at its prompt. So look again
+# after a moment and count only what is still running, rather than reporting every keystroke as a
+# restore. All launches are checked together after one wait, not one wait per pane.
+if [ "${#launched[@]}" -gt 0 ]; then
+    sleep "$(config_value verify_delay 1.5)"
+    for entry in "${launched[@]}"; do
+        pane_id=${entry%%$'\t'*}
+        label=${entry#*$'\t'}
+        info=$("$herdr" pane process-info --pane "$pane_id" 2>/dev/null) || info=""
+        if [ -n "$info" ] && [ "$(jq -r '.result.process_info.foreground_process_group_id' <<<"$info")" != \
+            "$(jq -r '.result.process_info.shell_pid' <<<"$info")" ]; then
+            echo "  restored  $label"
+            started=$((started + 1))
+        else
+            echo "  exited right away (see the pane)  $label" >&2
+            failed=$((failed + 1))
+        fi
+    done
+fi
+
+# The snapshot has been used, so autosave may track the session again. Lifted whatever the counts
+# say: a record that was skipped or failed will not do better on a second try, and keeping the hold
+# would only leave autosave off for the rest of the session.
+rm -f "$hold_file"
+
+echo "restored $started, already running $running, skipped $skipped, failed $failed"
+notify "Pane commands restored" \
+    "$started restored, $running already running, $skipped skipped, $failed failed"
 exit 0

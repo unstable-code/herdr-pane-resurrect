@@ -6,6 +6,9 @@ plugin_root=${HERDR_PLUGIN_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd
 state_dir=${HERDR_PLUGIN_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/herdr-pane-resurrect}
 config_dir=${HERDR_PLUGIN_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/herdr-pane-resurrect}
 state_file="$state_dir/panes.json"
+# Present while a freshly started server waits for its restore; bin/autosave explains why.
+# shellcheck disable=SC2034  # used by the scripts that source this file
+hold_file="$state_dir/hold"
 
 # config.toml is read with sed rather than a TOML parser: this plugin is four shell scripts with a
 # handful of scalar settings. Unknown keys are ignored.
@@ -19,6 +22,35 @@ config_value() {
 # Command basenames that are never saved, space separated. Idle shells are already skipped, so this
 # is for programs that should not come back — a long build, say, or something that prompts on start.
 exclude_names=$(config_value exclude "")
+
+# Directories a restart empties. A command whose arguments point in here names something that will
+# not exist when it is replayed.
+ephemeral_dirs="${XDG_RUNTIME_DIR:-/run/user/$(id -u)} ${TMPDIR:-}"
+
+# Whether an argv is worth replaying, as a jq function over the argv array. Save uses it to decide
+# what to record, and restore applies it again to what was recorded: a snapshot written by an older
+# version, or before a rule was added, would otherwise keep replaying something this one refuses.
+# Callers pass --arg ephemeral "$ephemeral_dirs" --arg exclude "$exclude_names".
+# (No apostrophes in here: the whole thing is one single-quoted shell string.)
+# shellcheck disable=SC2016  # jq variables, not shell ones: they must reach jq unexpanded
+replayable_jq='
+def replayable:
+    ($ephemeral | split(" ") | map(select(length > 1) | rtrimstr("/")) | unique) as $dirs
+    | ($exclude | split(" ") | map(select(length > 0))) as $excluded
+    | (.[0] | split("/") | last | ltrimstr("-")) as $name
+    # An interactive shell started inside the pane is a prompt too, just a nested one, and the
+    # environment that made it (sudo -i, the packages of a nix-shell) is not in its argv, so there is
+    # nothing to replay. "Interactive" means nothing but options follow the name of the shell:
+    # `bash -c ...` and `bash ./deploy.sh` are real commands and are kept.
+    | ((["bash", "zsh", "sh", "dash", "ksh", "mksh", "fish", "tcsh", "csh", "nu", "elvish", "xonsh"]
+        | index($name)) != null and (.[1:] | all(startswith("-")))) as $interactive
+    # A command pointing into the runtime or temp directory names something a restart removes. This
+    # is the shape nix-shell leaves behind: it execs into `bash --rcfile <TMPDIR>/.../rc`, and bash
+    # given a missing rcfile does not fail, it just opens an interactive shell - so replaying it
+    # "works" and leaves the pane in a stray bash.
+    | (any(.[1:][]; . as $arg | any($dirs[]; . as $dir | $arg | startswith($dir + "/")))) as $ephemeral_arg
+    | ($interactive or $ephemeral_arg or (($excluded | index($name)) != null)) | not;
+'
 
 truthy() { case "$1" in true | 1 | yes | on) return 0 ;; *) return 1 ;; esac }
 
@@ -56,9 +88,9 @@ collect() {
         --argjson workspaces "$(jq -c '.result.workspaces' <<<"$workspaces")" \
         --argjson procs "$procs" \
         --arg exclude "$exclude_names" \
-        --arg root "$plugin_root" '
-        ($exclude | split(" ") | map(select(length > 0))) as $excluded
-        | ($panes | map({key: .pane_id, value: .}) | from_entries) as $pane_by_id
+        --arg ephemeral "$ephemeral_dirs" \
+        --arg root "$plugin_root" "$replayable_jq"'
+        ($panes | map({key: .pane_id, value: .}) | from_entries) as $pane_by_id
         | ($tabs | map({key: .tab_id, value: .}) | from_entries) as $tab_by_id
         | ($workspaces | map({key: .workspace_id, value: .}) | from_entries) as $ws_by_id
         | [ $procs[]
@@ -71,7 +103,7 @@ collect() {
             | select($leader != null and ($leader.argv | type) == "array" and ($leader.argv | length) > 0)
             # The foreground process group being the shell itself means the pane sits at a prompt.
             | select($p.foreground_process_group_id != $p.shell_pid)
-            | select(($leader.argv[0] | split("/") | last) as $name | ($excluded | index($name)) | not)
+            | select($leader.argv | replayable)
             # Never record this plugin: a save that runs while restore is working would otherwise
             # write restore itself into the snapshot.
             | select($leader.argv[0] | startswith($root) | not)

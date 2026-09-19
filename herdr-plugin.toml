@@ -28,6 +28,7 @@ command = ["bin/restore"]
 # A snapshot is only useful if it exists when the session dies, and a session dies without warning:
 # logging out of a graphical session terminates the whole process tree, so there is no shutdown hook
 # to save from. The daemon keeps the snapshot current instead. --spawn returns immediately so the
-# startup hook does not hold one of herdr's plugin command slots for the whole session.
+# startup hook does not hold one of herdr's plugin command slots for the whole session. --startup
+# keeps the daemon from overwriting the snapshot until it has been restored (see bin/autosave).
 [[startup]]
-command = ["bin/autosave", "--spawn"]
+command = ["bin/autosave", "--spawn", "--startup"]
