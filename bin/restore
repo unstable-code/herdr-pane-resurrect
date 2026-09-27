@@ -154,8 +154,14 @@ for ((i = 0; i < total; i++)); do
         quoted="cd $(printf '%q' "$want_cwd") && $quoted"
     fi
 
+    # The leading ' ' keeps the replayed command out of the shell's history, where it would otherwise
+    # pile up as lines nobody typed - `claude --resume <uuid>` worst of all, since that uuid is noise
+    # no one will ever search for. Both zsh (HIST_IGNORE_SPACE) and bash (HISTCONTROL=ignorespace)
+    # drop a line starting with a space; a shell without the option records the command as before, so
+    # this costs nothing where it does not help. It is a separate argument rather than a space glued
+    # onto the first word because $quoted is expanded unquoted below, and word splitting would eat it.
     # shellcheck disable=SC2086  # already escaped above; it has to reach herdr as separate words
-    if "$herdr" pane run "$idle_pane" $quoted >/dev/null 2>&1; then
+    if "$herdr" pane run "$idle_pane" ' ' $quoted >/dev/null 2>&1; then
         used="$used $idle_pane"
         launched+=("$idle_pane"$'\t'"$kind"$'\t'"$label")
     else

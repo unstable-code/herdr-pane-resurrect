@@ -44,6 +44,12 @@ does well.
   is sitting at a prompt, and it skips a record whose command is already running, so restoring twice
   starts nothing the second time. It applies the save rules above once more to what it reads, so a
   snapshot written by an older version cannot replay something the current one refuses to record.
+- **A replayed command is not written to the shell's history.** Because restore brings a command back
+  by typing it, a restored session's history would otherwise fill with lines nobody typed —
+  `claude --resume <uuid>` worst of all, since that id is noise no one will ever search for. Each
+  command is therefore typed with a leading space, which zsh (`HIST_IGNORE_SPACE`) and bash
+  (`HISTCONTROL=ignorespace`) keep out of the history; a shell without that option set records the
+  command as before, so this costs nothing where it does not help.
 - `herdr pane run` succeeding only means the command was *typed*. restore therefore looks at every
   pane again a moment later and counts only what is still running; a command that failed at once
   (its script gone, say) is reported as *exited right away* rather than as restored.
@@ -167,6 +173,7 @@ panes) plus `beta` and `gamma`, whose tabs are both unnamed and therefore both l
 | Hard restart, then restore | each pane got its own conversation back (p1 → `aaaaaaaa-…`, p2 → `bbbbbbbb-…`); the dead processes' session files were not taken for live ones |
 | restore again | `agent(s): 0 restored, 2 already running`, judged by session id |
 | Against the live Claude Code 2.1.278 files | all eight open conversations resolved to their session ids; a wrong `procStart`, a dead pid and a malformed id were all refused |
+| `sleep 500` restored into a zsh pane with `HIST_IGNORE_SPACE` set | running again, and the history file empty; an `echo typed-by-hand` entered right afterwards was recorded as usual — a filter, not a broken history |
 
 ## Limitations
 
