@@ -188,6 +188,12 @@ panes) plus `beta` and `gamma`, whose tabs are both unnamed and therefore both l
 - The Claude support reads a file Claude Code does not document. If a Claude Code update changes it,
   Claude panes are quietly left out again — nothing is replayed wrongly, but nothing is replayed.
 
+## Third-party
+
+This plugin targets herdr, which is licensed under Apache-2.0. No herdr code or binary
+is redistributed here. tmux-resurrect is referenced in this README only as a functional
+comparison; none of its code is used.
+
 ## License
 
 [MIT](LICENSE)

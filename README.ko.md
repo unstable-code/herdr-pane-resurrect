@@ -168,6 +168,11 @@ claude   = true   # Claude 페인을 대화 단위로 기록 (동작 절 참조)
 - Claude 지원은 Claude Code 가 문서화하지 않은 파일을 읽는다. Claude Code 업데이트로 형식이 바뀌면 Claude
   페인은 다시 조용히 빠진다. 잘못 되살리는 일은 없지만, 되살리지도 못한다.
 
+## 제3자 저작물
+
+이 플러그인은 herdr 용이며 herdr 는 Apache-2.0 이다. herdr 의 코드나 바이너리를
+재배포하지는 않는다. README 의 tmux-resurrect 언급은 기능 비교일 뿐 코드를 가져다 쓰지 않는다.
+
 ## License
 
 [MIT](LICENSE)
