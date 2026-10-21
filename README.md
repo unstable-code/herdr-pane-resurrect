@@ -101,10 +101,10 @@ With `agent_order = true` the plugin keeps the order instead:
 - It installs an Agent view (`agent.view.set`) sorting by attention, then by that token — the same
   rule as `priority`, with a tiebreaker that survives a restart. herdr drops the view and the tokens
   when the server exits, so the `[[startup]]` hook reports the saved tokens and sets the view again.
-- **Going idle does not move an agent that already has a place.** A restored agent is detected idle
-  right after the restart, and recording that is exactly what would put the list back in detection
-  order. Work, a block or a finished turn always moves it, as in herdr's own sort; an agent started
-  in this session gets its place the first time it is seen.
+- **Only work, a block or a finished turn is recorded; going idle never is.** Every agent is detected
+  idle again right after a restart, in whatever order herdr finds them, and an agent with no saved
+  place cannot be told apart from one started in this session — recording that put the list back in
+  detection order. An agent without a place sorts last in its group until its first prompt.
 
 While the view (labelled `recently`) is on it replaces the sidebar's own sort, including the
 spaces/priority switch. Setting `agent_order = false` takes effect at the next server start, when herdr
@@ -210,6 +210,8 @@ agents by `herdr pane report-agent`:
 | Restarted with the saved file moved away | no tokens — herdr does not keep them; the startup hook is what brings them back |
 | Work on p3 after the restart | p3's token moved up and the file followed |
 | A pane whose token was gone (an event beating the startup hook), then work elsewhere | its saved place kept in the file; only the working pane's entry changed |
+| A pane that was only ever idle, among three that worked; restart, then all four detected idle again in reverse | the three keep their saved order, the idle-only pane gets no token and the saved file is unchanged (#3) |
+| A new agent in that session: idle, then working | no token while idle; one on its first `working`, saved under its position |
 | `agent_order = false`, then a restart | view gone (`active: false`), and the hook exits before reading anything else |
 
 ## Limitations

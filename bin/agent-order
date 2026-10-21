@@ -70,12 +70,13 @@ IFS=$'\t' read -r pane status < <(jq -r '[.data.pane_id // "", .data.agent_statu
     <<<"${HERDR_PLUGIN_EVENT_JSON:-null}" 2>/dev/null)
 [ -n "${pane:-}" ] || exit 0
 
-# Real activity always moves an agent up, as it does in herdr's own sort. Going idle only counts for
-# an agent that has no place yet - one started in this session. A restored agent is detected idle
-# right after the restart too, and recording that is exactly what would put the list back in
-# detection order; it already has its place from the startup hook.
+# Only real activity is recorded, and it always moves an agent up, as it does in herdr's own sort.
+# Going idle is never recorded: every agent is detected idle again right after a restart, in
+# whatever order herdr happens to find them, and an agent with no saved place cannot be told apart
+# from one started in this session. Recording that put the list back in detection order (#3). An
+# agent without a place sorts last in its group until its first prompt.
 case "${status:-}" in
-    working | blocked | done | idle) ;;
+    working | blocked | done) ;;
     *) exit 0 ;;
 esac
 
@@ -84,10 +85,6 @@ exec 9>"$state_dir/agent-order.lock" || exit 0
 flock -w 5 9 || exit 0
 
 panes=$("$herdr" pane list 2>/dev/null) || exit 0
-if [ "$status" = idle ] && [ "$(jq -r --arg p "$pane" --arg t "$order_token" \
-    '.result.panes[] | select(.pane_id == $p) | .tokens[$t] != null' <<<"$panes")" != false ]; then
-    exit 0
-fi
 
 value=$(printf '%016d' "$(now_ms)")
 report "$pane" "$value" || exit 0
