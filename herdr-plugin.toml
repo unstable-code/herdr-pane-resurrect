@@ -32,3 +32,12 @@ command = ["bin/restore"]
 # keeps the daemon from overwriting the snapshot until it has been restored (see bin/autosave).
 [[startup]]
 command = ["bin/autosave", "--spawn", "--startup"]
+
+# The order of the agents sidebar, which herdr itself forgets on restart (see bin/agent-order). Off
+# unless `agent_order = true` in config.toml: it replaces the sidebar's sort while it is on.
+[[startup]]
+command = ["bin/agent-order", "--startup"]
+
+[[events]]
+on = "pane.agent_status_changed"
+command = ["bin/agent-order"]

@@ -1,0 +1,109 @@
+#!/usr/bin/env bash
+# Keep the agents sidebar in the order it had before the server restarted.
+#
+# herdr's "priority" sort ranks agents by attention (blocked, done, working, idle) and breaks ties by
+# the most recent state change. That second key is a counter in the server's memory
+# (next_agent_state_change_seq) and is not written to session.json, so after a restart every agent
+# starts without one and they line up in the order they happened to be detected again. A workaround
+# until herdr saves it; then this file can go.
+#
+# This keeps the same two keys but takes the second from a pane token instead: the time of the
+# pane's last state change, which is saved here and reported again on the next start. The sort is
+# installed with agent.view.set, which herdr drops when the server exits, so the startup hook sets it
+# again. Off unless `agent_order = true`: while the view is on, it replaces the sidebar's own sort.
+#
+# Usage: agent-order            (event hook, pane.agent_status_changed)
+#        agent-order --startup  (startup hook)
+set -u
+
+# This runs on every agent state change in every pane, and the feature is off by default, so decide
+# that before sourcing lib.sh, whose top level reads config.toml several times. Turning it off takes
+# effect at the next server start, when herdr drops the view by itself.
+config="${HERDR_PLUGIN_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/herdr-pane-resurrect}/config.toml"
+grep -Eqs "^[[:space:]]*agent_order[[:space:]]*=[[:space:]]*[\"']?(true|1|yes|on)\b" "$config" || exit 0
+command -v jq >/dev/null 2>&1 || exit 0
+
+# shellcheck source=bin/lib.sh
+. "$(dirname "$0")/lib.sh"
+
+order_file="$state_dir/agent-order.json"
+order_token=resurrect_order
+metadata_source="herdr-pane-resurrect"
+view_source="plugin:${HERDR_PLUGIN_ID:-unstable-code.herdr-pane-resurrect}"
+
+# Replacing the view with the same one is harmless, so it is simply set again rather than tracked:
+# a copy of "is it on" kept here would go stale the moment anything else cleared it.
+set_view() {
+    herdr_request "$(jq -nc --arg s "$view_source" --arg t "$order_token" '
+        {id: "resurrect-view", method: "agent.view.set", params: {
+            source: $s, label: "recently",
+            sort: [{field: "attention", order: "desc"}, {field: {token: $t}, order: "desc"}]}}')" \
+        >/dev/null 2>&1
+}
+
+# report <pane> <value>: the value is a zero-padded millisecond time, so it doubles as the seq.
+report() {
+    "$herdr" pane report-metadata "$1" --source "$metadata_source" --seq "$((10#$2))" \
+        --token "$order_token=$2" >/dev/null 2>&1
+}
+
+# pane id -> "<workspace id>/<tab number>/<position in tab>", the key the command snapshot uses.
+# shellcheck disable=SC2016  # jq variables
+pane_keys_jq="$position_jq"'
+    ($tabs.result.tabs | map({key: .tab_id, value: .number}) | from_entries) as $number
+    | $panes.result.panes as $all
+    | [$all[] | {key: .pane_id, value: "\(.workspace_id)/\($number[.tab_id] // 0)/\(position($all))"}]
+    | from_entries'
+
+if [ "${1:-}" = "--startup" ]; then
+    set_view
+    [ -f "$order_file" ] || exit 0
+    panes=$("$herdr" pane list 2>/dev/null) || exit 0
+    tabs=$("$herdr" tab list 2>/dev/null) || exit 0
+    jq -r -n --argjson panes "$panes" --argjson tabs "$tabs" --slurpfile saved "$order_file" \
+        "$pane_keys_jq"' | to_entries[] | ($saved[0][.value] // empty) as $v | "\(.key)\t\($v)"' |
+        while IFS=$'\t' read -r pane value; do report "$pane" "$value"; done
+    exit 0
+fi
+
+IFS=$'\t' read -r pane status < <(jq -r '[.data.pane_id // "", .data.agent_status // ""] | @tsv' \
+    <<<"${HERDR_PLUGIN_EVENT_JSON:-null}" 2>/dev/null)
+[ -n "${pane:-}" ] || exit 0
+
+# Real activity always moves an agent up, as it does in herdr's own sort. Going idle only counts for
+# an agent that has no place yet - one started in this session. A restored agent is detected idle
+# right after the restart too, and recording that is exactly what would put the list back in
+# detection order; it already has its place from the startup hook.
+case "${status:-}" in
+    working | blocked | done | idle) ;;
+    *) exit 0 ;;
+esac
+
+# Event hooks run concurrently; the token write and the save below must not interleave.
+exec 9>"$state_dir/agent-order.lock" || exit 0
+flock -w 5 9 || exit 0
+
+panes=$("$herdr" pane list 2>/dev/null) || exit 0
+if [ "$status" = idle ] && [ "$(jq -r --arg p "$pane" --arg t "$order_token" \
+    '.result.panes[] | select(.pane_id == $p) | .tokens[$t] != null' <<<"$panes")" != false ]; then
+    exit 0
+fi
+
+value=$(printf '%016d' "$(now_ms)")
+report "$pane" "$value" || exit 0
+set_view
+
+# Every pane's place is saved, not only this one's, because closing or moving a pane shifts the
+# positions of the others. Merged over what was saved rather than replacing it: a pane whose token
+# has not been reported again yet (an event that beat the startup hook) keeps its saved place.
+tabs=$("$herdr" tab list 2>/dev/null) || exit 0
+order=$(jq -c -n -S --argjson panes "$panes" --argjson tabs "$tabs" \
+    --argjson saved "$(cat "$order_file" 2>/dev/null || echo '{}')" \
+    --arg p "$pane" --arg t "$order_token" --arg v "$value" \
+    "$pane_keys_jq"' as $keys
+    | $saved + ([$panes.result.panes[]
+        | (if .pane_id == $p then .tokens[$t] = $v else . end)
+        | select(.tokens[$t] != null) | {key: $keys[.pane_id], value: .tokens[$t]}]
+        | from_entries)') || exit 0
+store "$order" "$order_file"
+exit 0

@@ -89,10 +89,34 @@ does well.
   puts the snapshot on hold; running **restore**, or a **save** you ask for (the way to say "I will
   not restore that one"), lifts it.
 
+### Agent order (optional)
+
+herdr's `priority` sort for the agents sidebar ranks by attention (blocked, done, working, idle) and
+breaks ties by the most recent state change. That tiebreaker is a counter in the server's memory and
+is not saved, so after a restart the agents line up in the order they happened to be detected again.
+With `agent_order = true` the plugin keeps the order instead:
+
+- On every `pane.agent_status_changed` it reports the time as a pane token, `$resurrect_order`, and
+  saves every pane's token under the same key as the command snapshot.
+- It installs an Agent view (`agent.view.set`) sorting by attention, then by that token — the same
+  rule as `priority`, with a tiebreaker that survives a restart. herdr drops the view and the tokens
+  when the server exits, so the `[[startup]]` hook reports the saved tokens and sets the view again.
+- **Going idle does not move an agent that already has a place.** A restored agent is detected idle
+  right after the restart, and recording that is exactly what would put the list back in detection
+  order. Work, a block or a finished turn always moves it, as in herdr's own sort; an agent started
+  in this session gets its place the first time it is seen.
+
+While the view (labelled `recently`) is on it replaces the sidebar's own sort, including the
+spaces/priority switch. Setting `agent_order = false` takes effect at the next server start, when herdr
+drops the view by itself; `herdr plugin disable` drops it at once. This is a workaround until herdr
+saves its own tiebreaker.
+
 ## Requirements
 
 - herdr ≥ 0.9.0 (Linux / macOS)
 - `bash`, `jq`, `flock` (util-linux) on the herdr server's `PATH`
+- For `agent_order` only: `socat`, or an `nc` that has `-U` (OpenBSD/LibreSSL netcat). Agent views
+  have no CLI command, so the request goes to the socket directly.
 
 ## Installation
 
@@ -142,6 +166,7 @@ notify   = true   # show a notification when an action finishes
 exclude  = ""     # command names never saved, space separated: "cargo make"
 verify_delay = 1.5  # seconds restore waits before checking that each command is still running
 claude   = true   # record Claude panes by their conversation (see How it works)
+agent_order = false  # keep the agents sidebar order across restarts (see Agent order)
 ```
 
 `exclude` matches the program's base name. Panes sitting at a prompt are already skipped, so this is
@@ -174,6 +199,18 @@ panes) plus `beta` and `gamma`, whose tabs are both unnamed and therefore both l
 | restore again | `agent(s): 0 restored, 2 already running`, judged by session id |
 | Against the live Claude Code 2.1.278 files | all eight open conversations resolved to their session ids; a wrong `procStart`, a dead pid and a malformed id were all refused |
 | `sleep 500` restored into a zsh pane with `HIST_IGNORE_SPACE` set | running again, and the history file empty; an `echo typed-by-hand` entered right afterwards was recorded as usual — a filter, not a broken history |
+
+Agent order was checked on an isolated herdr 0.9.5 server, with three panes in one tab made into
+agents by `herdr pane report-agent`:
+
+| Case | Result |
+|---|---|
+| Work reported on p3, then p1, then p2 | tokens increasing in that order, saved under `w1/1/<position>`; the view set and owned by the plugin |
+| Server restarted, agents detected idle again in the reverse order | tokens and the saved file unchanged |
+| Restarted with the saved file moved away | no tokens — herdr does not keep them; the startup hook is what brings them back |
+| Work on p3 after the restart | p3's token moved up and the file followed |
+| A pane whose token was gone (an event beating the startup hook), then work elsewhere | its saved place kept in the file; only the working pane's entry changed |
+| `agent_order = false`, then a restart | view gone (`active: false`), and the hook exits before reading anything else |
 
 ## Limitations
 

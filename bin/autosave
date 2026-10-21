@@ -47,9 +47,6 @@ flock -n 9 || exit 0
 printf '%s\n' "$$" >"$pidfile"
 trap 'rm -f "$pidfile"' EXIT
 
-# Without a socket there is no server to ask. Fall back to herdr's default path rather than looping
-# forever with nothing to talk to.
-socket=${HERDR_SOCKET_PATH:-$HOME/.config/herdr/herdr.sock}
 unreachable=0
 # A stopped herdr can leave its socket file behind, so the file existing is not proof that the
 # server is alive. Three silent snapshots in a row mean nobody is listening: stop rather than spin.

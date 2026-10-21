@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Shared helpers for bin/save, bin/restore and bin/autosave.
+# Shared helpers for bin/save, bin/restore, bin/autosave and bin/agent-order.
 
 herdr=${HERDR_BIN_PATH:-herdr}
 plugin_root=${HERDR_PLUGIN_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}
@@ -10,7 +10,7 @@ state_file="$state_dir/panes.json"
 # shellcheck disable=SC2034  # used by the scripts that source this file
 hold_file="$state_dir/hold"
 
-# config.toml is read with sed rather than a TOML parser: this plugin is four shell scripts with a
+# config.toml is read with sed rather than a TOML parser: this plugin is a few shell scripts with a
 # handful of scalar settings. Unknown keys are ignored.
 config_value() {
     local key=$1 default=$2 value
@@ -52,7 +52,32 @@ def replayable:
     | ($interactive or $ephemeral_arg or (($excluded | index($name)) != null)) | not;
 '
 
+# A pane's position in its tab, the third part of every key this plugin saves (see collect). Pane ids
+# are handed out afresh on restart; workspace ids and tab numbers are not.
+# shellcheck disable=SC2016  # jq variables
+position_jq='
+def position($panes): . as $p | [$panes[] | select(.tab_id == $p.tab_id) | .pane_id] | index($p.pane_id) // 0;
+'
+
 truthy() { case "$1" in true | 1 | yes | on) return 0 ;; *) return 1 ;; esac }
+
+# Without a socket there is no server to ask; herdr's default path is the fallback.
+socket=${HERDR_SOCKET_PATH:-$HOME/.config/herdr/herdr.sock}
+
+# herdr_request <json>: one raw socket API request, for the methods the CLI has no command for
+# (agent.view.*). The server answers with one line and closes the connection.
+herdr_request() {
+    if command -v socat >/dev/null 2>&1; then
+        printf '%s\n' "$1" | timeout 5 socat - "UNIX-CONNECT:$socket"
+    else
+        printf '%s\n' "$1" | timeout 5 nc -U "$socket"
+    fi
+}
+
+now_ms() {
+    local t=${EPOCHREALTIME/[.,]/}
+    if [ -n "$t" ]; then printf '%s\n' "${t:0:${#t}-3}"; else date +%s%3N; fi
+}
 
 notify() {
     truthy "$(config_value notify true)" || return 0
@@ -146,7 +171,7 @@ collect() {
         --argjson procs "$procs" \
         --arg exclude "$exclude_names" \
         --arg ephemeral "$ephemeral_dirs" \
-        --arg root "$plugin_root" "$replayable_jq"'
+        --arg root "$plugin_root" "$replayable_jq$position_jq"'
         ($panes | map({key: .pane_id, value: .}) | from_entries) as $pane_by_id
         | ($tabs | map({key: .tab_id, value: .}) | from_entries) as $tab_by_id
         | ($workspaces | map({key: .workspace_id, value: .}) | from_entries) as $ws_by_id
@@ -173,7 +198,7 @@ collect() {
                 ws_label: ($ws_by_id[$pane.workspace_id].label // ""),
                 tab: ($tab.number // 0),
                 tab_label: ($tab.label // ""),
-                idx: ([$panes[] | select(.tab_id == $pane.tab_id) | .pane_id] | index($pane.pane_id) // 0),
+                idx: ($pane | position($panes)),
                 cwd: ($leader.cwd // $pane.foreground_cwd // $pane.cwd // ""),
                 # A Claude pane is recorded by its conversation, whatever it was started with
                 # (`claude -r` with the picker leaves no id in the argv).
@@ -191,14 +216,14 @@ record_line() {
         | "\($ws)/\($tab)  \(.argv | join(" "))"' <<<"$1"
 }
 
-# Write the snapshot only when it differs, so an autosave tick that finds nothing new does not
-# rewrite the file every interval.
+# store <records> [file]: write the snapshot (or another state file) only when it differs, so an
+# autosave tick that finds nothing new does not rewrite the file every interval.
 store() {
-    local records=$1 previous
+    local records=$1 file=${2:-$state_file} previous
     mkdir -p "$state_dir" 2>/dev/null || return 1
-    previous=$(cat "$state_file" 2>/dev/null)
+    previous=$(cat "$file" 2>/dev/null)
     [ "$records" = "$previous" ] && return 2
-    printf '%s\n' "$records" >"$state_file.tmp" && mv "$state_file.tmp" "$state_file"
+    printf '%s\n' "$records" >"$file.tmp" && mv "$file.tmp" "$file"
 }
 
 # Start bin/autosave unless it is already running. The [[startup]] hook only fires when the herdr

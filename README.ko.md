@@ -75,10 +75,31 @@ tmux-resurrect 중 herdr 에 없는 절반만 맡는다. herdr 이 이미 잘하
   스냅샷이 떠돌이 `bash` 한 줄로 바뀌었다. 이제 `[[startup]]` 훅이 스냅샷을 보호 상태로 두고, **restore**
   를 실행하거나 **save 를 직접** 누르면(= "그건 복원하지 않겠다") 풀린다.
 
+### 에이전트 순서 (선택)
+
+herdr 의 에이전트 사이드바 `priority` 정렬은 attention(blocked, done, working, idle) 순으로 세우고, 같은
+등급 안에서는 가장 최근 상태 변경이 위로 온다. 이 두 번째 기준은 서버 메모리의 카운터라 저장되지 않는다.
+그래서 재시작하면 에이전트가 다시 감지된 순서대로 줄을 선다. `agent_order = true` 로 켜면 순서를 지킨다.
+
+- `pane.agent_status_changed` 가 올 때마다 그 시각을 페인 토큰 `$resurrect_order` 로 보고하고, 모든
+  페인의 토큰을 명령 스냅샷과 같은 키로 저장한다.
+- Agent view(`agent.view.set`)를 걸어 attention 다음에 그 토큰으로 정렬한다. `priority` 와 같은 규칙이고,
+  동점 처리 기준만 재시작을 견디는 값으로 바꾼 것이다. 서버가 끝나면 herdr 가 view 와 토큰을 버리므로,
+  `[[startup]]` 훅이 저장된 토큰을 다시 보고하고 view 를 다시 건다.
+- **이미 자리가 있는 에이전트는 idle 로 바뀌어도 움직이지 않는다.** 복원된 에이전트는 재시작 직후 idle
+  로 다시 감지되는데, 그걸 기록하면 바로 감지 순서로 되돌아간다. 작업·blocked·턴 종료는 herdr 자체
+  정렬처럼 항상 위로 올리고, 이번 세션에 새로 뜬 에이전트는 처음 보일 때 자리를 받는다.
+
+view(라벨 `recently`)가 켜져 있는 동안에는 사이드바 자체 정렬(spaces/priority 전환 포함)이 가려진다.
+`agent_order = false` 는 다음 서버 시작부터 적용된다 — 그때 herdr 가 view 를 스스로 버린다. 바로 끄려면
+`herdr plugin disable`. herdr 가 동점 처리 기준을 직접 저장하게 되기 전까지의 우회책이다.
+
 ## 요구 사항
 
 - herdr ≥ 0.9.0 (Linux / macOS)
 - herdr 서버의 `PATH` 에 `bash`, `jq`, `flock`(util-linux)
+- `agent_order` 를 쓸 때만: `socat`, 또는 `-U` 가 있는 `nc`(OpenBSD/LibreSSL netcat). Agent view 에는
+  CLI 명령이 없어 소켓으로 직접 요청한다.
 
 ## 설치
 
@@ -126,6 +147,7 @@ notify   = true   # 액션이 끝나면 알림 표시
 exclude  = ""     # 저장하지 않을 명령 이름, 공백 구분: "cargo make"
 verify_delay = 1.5  # restore 가 각 명령이 아직 돌고 있는지 확인하기 전 기다리는 시간(초)
 claude   = true   # Claude 페인을 대화 단위로 기록 (동작 절 참조)
+agent_order = false  # 재시작해도 에이전트 사이드바 순서 유지 (에이전트 순서 절 참조)
 ```
 
 `exclude` 는 실행 파일의 basename 과 맞춘다. 프롬프트만 떠 있는 페인은 애초에 빠지므로, 이건 "되살아나면
@@ -157,6 +179,18 @@ claude   = true   # Claude 페인을 대화 단위로 기록 (동작 절 참조)
 | restore 재실행 | `agent(s): 0 restored, 2 already running`, 세션 id 로 판정 |
 | 실제 Claude Code 2.1.278 파일에 대고 | 열려 있던 대화 8개 모두 세션 id 로 풀림. 틀린 `procStart`·죽은 pid·잘못된 id 는 모두 거부 |
 | `HIST_IGNORE_SPACE` 를 켠 zsh 페인에 `sleep 500` 복원 | 복원돼 돌고 있는데 히스토리 파일은 비어 있음. 직후 직접 입력한 `echo typed-by-hand` 는 그대로 기록 — 필터일 뿐 히스토리를 죽이지 않는다 |
+
+에이전트 순서는 격리된 herdr 0.9.5 서버에서, 한 탭의 페인 셋을 `herdr pane report-agent` 로 에이전트로
+만들어 확인했다.
+
+| 경우 | 결과 |
+|---|---|
+| p3 → p1 → p2 순으로 작업 보고 | 토큰이 그 순서로 커지고 `w1/1/<위치>` 키로 저장. view 가 걸리고 소유자는 이 플러그인 |
+| 서버 재시작 후 에이전트를 역순으로 다시 idle 감지 | 토큰과 저장 파일 모두 그대로 |
+| 저장 파일을 치워 두고 재시작 | 토큰 없음 — herdr 는 토큰을 보관하지 않는다. 되살리는 건 startup 훅이다 |
+| 재시작 후 p3 에서 작업 | p3 토큰이 올라가고 파일도 따라감 |
+| 토큰이 빠진 페인(startup 훅보다 먼저 온 이벤트 상황)이 있는 채로 다른 페인 작업 | 그 페인의 저장된 자리는 파일에 유지, 작업한 페인 항목만 바뀜 |
+| `agent_order = false` 후 재시작 | view 해제(`active: false`), 훅은 다른 것을 읽기 전에 종료 |
 
 ## 한계
 
