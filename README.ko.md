@@ -24,7 +24,13 @@ tmux-resurrect 중 herdr 에 없는 절반만 맡는다. herdr 이 이미 잘하
 ## 동작
 
 - **save** 는 각 페인에서 돌고 있는 명령을 기록한다. 프로세스 그룹의 **리더**를 잡으므로, 파이프라인은
-  조각이 아니라 실제로 입력한 한 줄로 기록된다. 다음은 일부러 뺀다.
+  조각이 아니라 실제로 입력한 한 줄로 기록된다. nix 래퍼를 거쳐 실행된 명령도 입력한 모양으로
+  기록한다. 래퍼는 자기 플래그를 붙여 같은 프로세스에서 진짜 프로그램으로 exec 하므로, argv 에 아무도 치지
+  않은 플래그(`mpv --script=…/mpris.so …`)나 래핑 전 프로그램의 store 경로가 남는다. 그대로 되살리면 래퍼를
+  다시 거쳐 복원할 때마다 한 벌씩 늘었다. 래퍼의 플래그와 정확히 같은 부분만 떼고 입력한 이름을 되돌리며,
+  restore 도 떠 있는 명령을 같은 방식으로 비교하므로 "이미 실행 중" 판정은 그대로 맞는다. 모양이 다른
+  래퍼나 셸 확장이 든 플래그면 argv 를 그대로 둔다. 업데이트 전 래퍼가 붙인 플래그(옛 store 경로)도 지금
+  래퍼와 같지 않으므로 그대로 남는다. 다음은 일부러 뺀다.
   - 프롬프트만 떠 있는 페인 — 되살릴 게 없다.
   - Claude 를 뺀 에이전트 페인 — herdr 이 직접 resume 하므로 되살리면 같은 에이전트가 두 개 뜬다.
   - **페인 안에서 띄운 대화형 셸**(`nix-shell`, `sudo -i`, 중첩 `bash`) — 이것도 결국 프롬프트이고, 그 셸을
@@ -181,6 +187,11 @@ agent_order = false  # 재시작해도 에이전트 사이드바 순서 유지 (
 | 보호 중 save 직접 실행 | 보호 해제 |
 | 기본 세션 옆에 named session 기동 (`herdr --session prtest server`, herdr 0.9.5) | `sessions/prtest/` 아래 자기 데몬·락·pid. 기본 세션 스냅샷은 그대로(md5 동일)이고 보호 상태도 생기지 않음. 그쪽에서 save 하면 `sessions/prtest/panes.json` 에 쓰고, restore 는 기본 스냅샷에서 아무것도 재생하지 않음 |
 | 페인에서 실제 `nix-shell -p hello` (리더 `bash --rcfile $TMPDIR/nix-shell-…/rc`) | 저장 안 함. 옆 페인의 `bash -c 'sleep 600 \| cat'` 은 그대로 저장 |
+| makeBinaryWrapper 래퍼로 띄운 mpv, 이전 복원으로 argv 에 래퍼의 `--script=…` 가 이미 두 벌 | `mpv --no-video --loop-file=inf <파일>` 로 저장. 옆의 ssh·Claude 기록은 그대로 |
+| makeWrapper 셸 래퍼로 띄운 nvim (argv[0] 이 `neovim-unwrapped` store 경로, 이어서 `--cmd "lua …"`) | `nvim --headless +sleep 20` 으로 저장 |
+| wrapProgram 형식 래퍼(`exec -a "$0" "…/.x-wrapped" --headless "$@"`)로 한 번, 그리고 플래그가 이미 반복된 채로 | 둘 다 래퍼 플래그 없이 저장 |
+| 래퍼를 거치지 않은 명령(`sleep`·`ssh`) | argv 그대로 |
+| 위 mpv 가 떠 있는 상태에서 restore | 입력한 모양으로 비교해 이미 실행 중으로 판정 |
 | 그 nix-shell 기록을 담은 이전 버전 스냅샷 | *not replayable* 로 건너뜀, 페인에 입력하지 않음 |
 | 스냅샷의 `bash /nonexistent/deploy.sh` | 입력 후 즉시 실패, *exited right away* 로 보고 — `command(s): 1 restored, 0 already running, 1 skipped, 1 failed` |
 | 같은 디렉터리의 Claude 페인 둘 (Claude Code 처럼 `sessions/<pid>.json` 을 쓰는 대역) | `claude --resume aaaaaaaa-…`, `claude --resume bbbbbbbb-…` 로 저장 |

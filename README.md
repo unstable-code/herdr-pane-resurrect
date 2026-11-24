@@ -25,7 +25,15 @@ does well.
 ## How it works
 
 - **save** records the command running in each pane — the process group leader, so a pipeline is
-  recorded as the one command that was typed rather than as its parts. Some panes are left out on
+  recorded as the one command that was typed rather than as its parts. A command started through a
+  nix wrapper is recorded as typed too: a wrapper adds its own flags and execs the real program in
+  the same process, so its argv carries flags nobody typed (`mpv --script=…/mpris.so …`) or the
+  unwrapped program's store path. Replayed, those went through the wrapper again and gained a copy
+  per restore. The wrapper's flags are taken off where they match it exactly, and the name typed is
+  put back; restore compares a running command the same way, so it is still found already running.
+  A wrapper of another shape, or a flag with a shell expansion in it, leaves the argv as it is — and
+  so do flags an earlier version of the wrapper added (an older store path): they no longer match.
+  Some panes are left out on
   purpose:
   - panes sitting at a prompt — there is nothing to bring back;
   - agent panes other than Claude — herdr resumes those itself, and replaying them would start a
@@ -202,6 +210,11 @@ panes) plus `beta` and `gamma`, whose tabs are both unnamed and therefore both l
 | save by hand while on hold | hold lifted |
 | A named session started next to the default one (`herdr --session prtest server`, herdr 0.9.5) | its own daemon, lock and pid under `sessions/prtest/`; the default session's snapshot unchanged (same md5) and no hold written. A save there wrote `sessions/prtest/panes.json`, and restore there replayed nothing from the default snapshot |
 | A real `nix-shell -p hello` in a pane (leader `bash --rcfile $TMPDIR/nix-shell-…/rc`) | not saved; `bash -c 'sleep 600 \| cat'` next to it still saved |
+| mpv started through its makeBinaryWrapper, its argv already holding the wrapper's `--script=…` twice from earlier restores | saved as `mpv --no-video --loop-file=inf <file>`; ssh and the Claude records next to it unchanged |
+| nvim through its makeWrapper shell wrapper (argv[0] the `neovim-unwrapped` store path, then `--cmd "lua …"`) | saved as `nvim --headless +sleep 20` |
+| A wrapProgram-style wrapper (`exec -a "$0" "…/.x-wrapped" --headless "$@"`), started once and with the flag already repeated | both saved without the wrapper's flag |
+| A command not started through a wrapper (`sleep`, `ssh`) | argv unchanged |
+| restore against the running mpv above | taken for already running, compared as typed |
 | A snapshot from an older version holding that nix-shell record | skipped as *not replayable*, not typed into the pane |
 | `bash /nonexistent/deploy.sh` in the snapshot | typed, failed at once, reported as *exited right away* — `command(s): 1 restored, 0 already running, 1 skipped, 1 failed` |
 | Two Claude panes in the same directory (a stand-in that registers `sessions/<pid>.json` the way Claude Code does) | saved as `claude --resume aaaaaaaa-…` and `claude --resume bbbbbbbb-…` |

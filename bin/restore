@@ -117,12 +117,16 @@ for ((i = 0; i < total; i++)); do
             | (.foreground_processes // []) as $fg
             | (($fg | map(select(.pid == $g)) | first) // ($fg | first))
             | .argv // null' <<<"$info")
-        if [ "$(jq -r '.result.process_info.foreground_process_group_id' <<<"$info")" = \
-            "$(jq -r '.result.process_info.shell_pid' <<<"$info")" ]; then
+        IFS=$'\t' read -r leader shell < <(jq -r '.result.process_info
+            | "\(.foreground_process_group_id // "")\t\(.shell_pid // "")"' <<<"$info")
+        if [ "$leader" = "$shell" ]; then
             [ -z "$idle_pane" ] && idle_pane=$pane_id
-        elif [ "$leader_argv" = "$want_argv" ]; then
+        elif [ "$leader_argv" = "$want_argv" ] ||
+            [ "$(typed_argv "$leader" "$shell")" = "$want_argv" ]; then
             # Compared as whole argv, not by program name: `watch w` and
             # `watch 'df -h | grep -v tmpfs'` are both watch and must not be taken for each other.
+            # A command started through a nix wrapper is recorded as typed, so it is compared as typed
+            # too (typed_argv) — its raw argv carries the wrapper's flags and would never match.
             claimed=$pane_id
             break
         fi

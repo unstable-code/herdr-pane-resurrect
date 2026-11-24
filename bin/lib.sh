@@ -142,6 +142,85 @@ claude_session_live() {
     return 1
 }
 
+# typed_argv <pid> <shell pid>: the command as it was typed, when <pid> was started through a nix
+# wrapper — as a JSON array — or nothing, when it was not or the wrapper cannot be read (#5). Save
+# records this, and restore compares running commands against it.
+#
+# A wrapper adds its own flags and execs the real program in the same pid, so the argv herdr reports
+# carries flags nobody typed, or (for a shell wrapper without `exec -a`) the unwrapped program's store
+# path as argv[0]. Replayed, the first went through the wrapper again and gained a copy per restore.
+#
+# The wrapper is the file the typed name resolves to on PATH, when that file is not the running
+# program itself. The program's own PATH comes first — it is the shell's PATH as it was when the
+# command ran, rc-file additions included — and the shell's environ second, for a wrapper that put a
+# directory holding the program itself in front. Read as nixpkgs generates them:
+#   makeWrapper / wrapProgram (shell)   the last line, exec [-a "$0"] "<program>" <flags> "$@" <flags>
+#   makeBinaryWrapper (C binary)        the makeCWrapper command it embeds: --add-flag(s), --append-flag(s)
+# The wrapper's flags come off only where they match exactly: at the front as often as they repeat (a
+# snapshot replayed before this fix holds several copies), and once at the end. Anything else — a
+# flag that differs, one with a shell expansion in it, a wrapper of another shape — leaves the argv as
+# it was: a command recorded with too much is better than one cut wrongly.
+typed_argv() {
+    local pid=$1 shell=$2 exe name entry from wrapper="" found magic line target kind many text i
+    local args=() pre=() post=() words=() lines=()
+    exe=$(readlink "/proc/$pid/exe" 2>/dev/null) || return 1
+    mapfile -d '' -t args <"/proc/$pid/cmdline" 2>/dev/null
+    [ ${#args[@]} -gt 0 ] || return 1
+    name=${args[0]##*/}
+    for from in "$pid" "$shell"; do
+        while IFS= read -r -d '' entry; do
+            [[ $entry == PATH=* ]] || continue
+            found=$(PATH=${entry#PATH=} type -P -- "$name") && found=$(readlink -f "$found") &&
+                [ "$found" != "$exe" ] && wrapper=$found
+            break
+        done 2>/dev/null <"/proc/$from/environ"
+        [ -n "$wrapper" ] && break
+    done
+    [ -n "$wrapper" ] || return 1
+
+    IFS= read -rn2 magic <"$wrapper"
+    if [ "$magic" = '#!' ]; then
+        mapfile -t lines <"$wrapper"
+        for ((i = ${#lines[@]} - 1; i >= 0; i--)); do
+            [[ ${lines[i]} == exec\ * ]] && line=${lines[i]} && break
+        done
+        [[ ${line:-} =~ ^exec\ (-a\ \"\$0\"\ )?\"([^\"]+)\"(.*)\ \"\$@\"(.*)$ ]] || return 1
+        target=${BASH_REMATCH[2]}
+        mapfile -d '' -t pre < <(wrapper_words "${BASH_REMATCH[3]}")
+        mapfile -d '' -t post < <(wrapper_words "${BASH_REMATCH[4]}")
+    else
+        local doc
+        doc=$(tr -c '[:print:]\n' '\n' <"$wrapper" | sed -n "/^makeCWrapper '/,/^\$/p")
+        [[ $doc =~ ^makeCWrapper\ \'([^\']+)\' ]] || return 1
+        target=${BASH_REMATCH[1]}
+        while IFS= read -r line; do
+            [[ ${line%\\} =~ --(add|append)-flag(s?)\ (.*)$ ]] || continue
+            kind=${BASH_REMATCH[1]} many=${BASH_REMATCH[2]} text=${BASH_REMATCH[3]}
+            mapfile -d '' -t words < <(wrapper_words "$text")
+            # makeCWrapper splits --*-flags on whitespace; --*-flag is one argument.
+            [ -n "$many" ] && read -ra words <<<"${words[*]}"
+            if [ "$kind" = add ]; then pre+=("${words[@]}"); else post+=("${words[@]}"); fi
+        done <<<"$doc"
+    fi
+    [ "$(readlink -f "$target")" = "$exe" ] || return 1
+
+    # Words go to jq NUL-separated on stdin: an argument such as --script=... would be taken for one
+    # of jq's own options on its command line. The three parts are copied out ([...[]]) rather than
+    # sliced: jq 1.8.2 compares two slices of one array wrongly (["y","z"] == ["a","b"] is true when
+    # both are slices of ["a","b","x","y","z"]), which here took every argument off.
+    printf '%s\0' "${pre[@]}" "${post[@]}" "${args[@]}" |
+        jq -c -Rs --arg name "$name" --argjson np ${#pre[@]} --argjson nq ${#post[@]} '
+            split("\u0000")[:-1] as $a | [$a[:$np][]] as $pre | [$a[$np:$np + $nq][]] as $post
+            | [$a[$np + $nq + 1:][]]
+            | until($np == 0 or .[:$np] != $pre; .[$np:])
+            | if $nq > 0 and .[-$nq:] == $post then .[:-$nq] else . end
+            | [$name] + .'
+}
+
+# wrapper_words <text>: <text> split like a command line — quotes removed, nothing expanded — as
+# NUL-terminated words. xargs does exactly that, and runs nothing it reads.
+wrapper_words() { printf '%s' "$1" | xargs -r printf '%s\0' 2>/dev/null; }
+
 # A workspace keeps its id across a restart (session.json stores it as "id": "w3"), and so does a
 # tab's number (public_tab_numbers). Pane ids do not — they are handed out afresh — which is why a
 # record is keyed by workspace id + tab number + the pane's position inside that tab.
@@ -150,7 +229,7 @@ claude_session_live() {
 # panes are left out entirely: herdr resumes those itself ([session] resume_agents_on_restore), so
 # replaying them would start a second copy of the same agent.
 collect() {
-    local panes tabs workspaces procs pane_id agent info leader session
+    local panes tabs workspaces procs pane_id agent info leader shell session typed extra
     panes=$("$herdr" pane list 2>/dev/null) || return 1
     tabs=$("$herdr" tab list 2>/dev/null) || return 1
     workspaces=$("$herdr" workspace list 2>/dev/null) || return 1
@@ -160,15 +239,18 @@ collect() {
         while IFS=$'\t' read -r pane_id agent; do
             [ -n "$pane_id" ] || continue
             info=$("$herdr" pane process-info --pane "$pane_id" 2>/dev/null) || continue
+            IFS=$'\t' read -r leader shell < <(jq -r '.result.process_info
+                | "\(.foreground_process_group_id // "")\t\(.shell_pid // "")"' <<<"$info" 2>/dev/null)
+            extra='{}'
             if [ "$agent" = claude ]; then
                 truthy "$claude_resume" || continue
-                leader=$(jq -r '.result.process_info.foreground_process_group_id // empty' <<<"$info")
                 session=$(claude_session_of "$leader") || continue
-                jq -c --arg session "$session" '.result.process_info + {claude_session: $session}' \
-                    <<<"$info" 2>/dev/null
-            else
-                jq -c '.result.process_info' <<<"$info" 2>/dev/null
+                extra="{\"claude_session\":\"$session\"}"  # a UUID, checked by claude_session_of
+            elif [ "$leader" != "$shell" ] && typed=$(typed_argv "$leader" "$shell"); then
+                # A pane at a prompt is dropped below anyway; only a running command is looked at.
+                extra="{\"typed_argv\":$typed}"
             fi
+            jq -c --argjson extra "$extra" '.result.process_info + $extra' <<<"$info" 2>/dev/null
         done < <(jq -r '.result.panes[] | select((has("agent") | not) or .agent == "claude")
                     | "\(.pane_id)\t\(.agent // "")"' <<<"$panes") | jq -s -c .
     )
@@ -212,7 +294,9 @@ collect() {
                 cwd: ($leader.cwd // $pane.foreground_cwd // $pane.cwd // ""),
                 # A Claude pane is recorded by its conversation, whatever it was started with
                 # (`claude -r` with the picker leaves no id in the argv).
+                # A command started through a nix wrapper is recorded as typed (see typed_argv).
                 argv: (if $p.claude_session then ["claude", "--resume", $p.claude_session]
+                       elif $p.typed_argv and $leader.pid == $p.foreground_process_group_id then $p.typed_argv
                        else $leader.argv end),
               } ]
         | sort_by([.ws, .tab, .idx])'
