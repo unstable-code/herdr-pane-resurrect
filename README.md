@@ -194,6 +194,7 @@ panes) plus `beta` and `gamma`, whose tabs are both unnamed and therefore both l
 | Restore run a second time | `command(s): 0 restored, 3 already running` — nothing started twice |
 | Saved workspace closed before restore | reported as skipped, nothing started elsewhere |
 | Five concurrent `bin/autosave --spawn` | exactly one daemon |
+| The daemon killed mid-interval, then `--spawn` at once (#2) | nothing left holding the lock — the sleep no longer inherits it — and a new daemon started immediately |
 | A command ended in a pane | snapshot updated within one interval |
 | Server stopped | daemon exited on its own and removed its pid file |
 | Server killed hard with its panes, then started again (plugin linked, `[[startup]]` hook live) | snapshot put on hold; a new command in a pane left it untouched across three ticks |

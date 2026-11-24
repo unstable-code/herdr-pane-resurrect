@@ -50,13 +50,16 @@ unreachable=0
 # server is alive. Three silent snapshots in a row mean nobody is listening: stop rather than spin.
 max_unreachable=3
 
+# Children get the lock closed (9>&-). A child that inherits it holds the lock as long as it lives,
+# and one outliving a killed daemon — the sleep, most of the time — would keep every new daemon out
+# for up to an interval, with nothing to say so (#2).
 while :; do
-    sleep "$interval"
+    sleep "$interval" 9>&-
     # Exit with the server: a leftover daemon would keep saving a session that no longer exists,
     # overwriting the snapshot that is supposed to survive it.
     [ -S "$socket" ] || exit 0
 
-    if records=$(collect) && [ -n "$records" ]; then
+    if records=$(collect 9>&-) && [ -n "$records" ]; then
         unreachable=0
     else
         unreachable=$((unreachable + 1))
