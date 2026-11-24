@@ -29,10 +29,11 @@ does well.
   nix wrapper is recorded as typed too: a wrapper adds its own flags and execs the real program in
   the same process, so its argv carries flags nobody typed (`mpv --script=…/mpris.so …`) or the
   unwrapped program's store path. Replayed, those went through the wrapper again and gained a copy
-  per restore. The wrapper's flags are taken off where they match it exactly, and the name typed is
+  per restore. The wrapper's flags are taken off where they match it, and the name typed is
   put back; restore compares a running command the same way, so it is still found already running.
-  A wrapper of another shape, or a flag with a shell expansion in it, leaves the argv as it is — and
-  so do flags an earlier version of the wrapper added (an older store path): they no longer match.
+  Store hashes are not compared, so the copies an earlier build of the wrapper left behind (the same
+  package rebuilt at a new hash) come off too; a flag naming another version does not, and neither
+  does anything from a wrapper of another shape or a flag with a shell expansion in it.
   Some panes are left out on
   purpose:
   - panes sitting at a prompt — there is nothing to bring back;
@@ -214,6 +215,7 @@ panes) plus `beta` and `gamma`, whose tabs are both unnamed and therefore both l
 | nvim through its makeWrapper shell wrapper (argv[0] the `neovim-unwrapped` store path, then `--cmd "lua …"`) | saved as `nvim --headless +sleep 20` |
 | A wrapProgram-style wrapper (`exec -a "$0" "…/.x-wrapped" --headless "$@"`), started once and with the flag already repeated | both saved without the wrapper's flag |
 | A command not started through a wrapper (`sleep`, `ssh`) | argv unchanged |
+| Wrapper flags whose store hash differs from today's (`586b…` ×4 + `vr10…` ×1 before the file), and one naming `mpv-mpris-1.4` | the hash-only copies all taken off; the `1.4` flag left in place |
 | restore against the running mpv above | taken for already running, compared as typed |
 | A snapshot from an older version holding that nix-shell record | skipped as *not replayable*, not typed into the pane |
 | `bash /nonexistent/deploy.sh` in the snapshot | typed, failed at once, reported as *exited right away* — `command(s): 1 restored, 0 already running, 1 skipped, 1 failed` |

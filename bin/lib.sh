@@ -160,6 +160,11 @@ claude_session_live() {
 # snapshot replayed before this fix holds several copies), and once at the end. Anything else — a
 # flag that differs, one with a shell expansion in it, a wrapper of another shape — leaves the argv as
 # it was: a command recorded with too much is better than one cut wrongly.
+#
+# Store hashes are left out of every comparison here (store_bare, and bare in jq): a package rebuilt
+# at the same version moves to a new hash. A program still running from before a switch is the old
+# build while PATH already leads to the new wrapper, and the copies an older wrapper left in a
+# snapshot differ from today's flags only there. A changed name, version or path still has to match.
 typed_argv() {
     local pid=$1 shell=$2 exe name entry from wrapper="" found magic line target kind many text i
     local args=() pre=() post=() words=() lines=()
@@ -171,7 +176,7 @@ typed_argv() {
         while IFS= read -r -d '' entry; do
             [[ $entry == PATH=* ]] || continue
             found=$(PATH=${entry#PATH=} type -P -- "$name") && found=$(readlink -f "$found") &&
-                [ "$found" != "$exe" ] && wrapper=$found
+                [ "$(store_bare "$found")" != "$(store_bare "$exe")" ] && wrapper=$found
             break
         done 2>/dev/null <"/proc/$from/environ"
         [ -n "$wrapper" ] && break
@@ -202,7 +207,7 @@ typed_argv() {
             if [ "$kind" = add ]; then pre+=("${words[@]}"); else post+=("${words[@]}"); fi
         done <<<"$doc"
     fi
-    [ "$(readlink -f "$target")" = "$exe" ] || return 1
+    [ "$(store_bare "$(readlink -f "$target")")" = "$(store_bare "$exe")" ] || return 1
 
     # Words go to jq NUL-separated on stdin: an argument such as --script=... would be taken for one
     # of jq's own options on its command line. The three parts are copied out ([...[]]) rather than
@@ -210,12 +215,18 @@ typed_argv() {
     # both are slices of ["a","b","x","y","z"]), which here took every argument off.
     printf '%s\0' "${pre[@]}" "${post[@]}" "${args[@]}" |
         jq -c -Rs --arg name "$name" --argjson np ${#pre[@]} --argjson nq ${#post[@]} '
-            split("\u0000")[:-1] as $a | [$a[:$np][]] as $pre | [$a[$np:$np + $nq][]] as $post
+            def bare: map(gsub("/nix/store/[0-9a-z]{32}-"; "/nix/store/"));
+            split("\u0000")[:-1] as $a | ([$a[:$np][]] | bare) as $pre
+            | ([$a[$np:$np + $nq][]] | bare) as $post
             | [$a[$np + $nq + 1:][]]
-            | until($np == 0 or .[:$np] != $pre; .[$np:])
-            | if $nq > 0 and .[-$nq:] == $post then .[:-$nq] else . end
+            | until($np == 0 or (.[:$np] | bare) != $pre; .[$np:])
+            | if $nq > 0 and (.[-$nq:] | bare) == $post then .[:-$nq] else . end
             | [$name] + .'
 }
+
+# store_bare <path>: <path> with its /nix/store hash taken out, for comparing two builds of one
+# package (see typed_argv).
+store_bare() { [[ $1 =~ ^(.*/nix/store/)[0-9a-z]{32}-(.*)$ ]] && printf '%s' "${BASH_REMATCH[1]}${BASH_REMATCH[2]}" || printf '%s' "$1"; }
 
 # wrapper_words <text>: <text> split like a command line — quotes removed, nothing expanded — as
 # NUL-terminated words. xargs does exactly that, and runs nothing it reads.
