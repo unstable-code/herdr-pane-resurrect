@@ -30,7 +30,6 @@ pidfile="$state_dir/autosave.pid"
 if [ "${1:-}" = "--spawn" ]; then
     truthy "$(config_value autosave true)" || exit 0
     command -v jq >/dev/null 2>&1 || exit 0
-    mkdir -p "$state_dir" 2>/dev/null || exit 0
     # Only a snapshot that holds something is worth protecting.
     if [ "${2:-}" = "--startup" ] && [ "$(jq 'length' "$state_file" 2>/dev/null || echo 0)" -gt 0 ]; then
         : >"$hold_file"
@@ -39,7 +38,6 @@ if [ "${1:-}" = "--spawn" ]; then
     exit 0
 fi
 
-mkdir -p "$state_dir" 2>/dev/null || exit 0
 # Exactly one daemon, even when the startup hook and an action race to spawn one: the lock is held
 # for the daemon's whole life, so a second copy exits immediately. A crashed daemon releases it.
 exec 9>"$lockfile" || exit 0

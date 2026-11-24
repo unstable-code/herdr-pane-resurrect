@@ -4,6 +4,19 @@
 herdr=${HERDR_BIN_PATH:-herdr}
 plugin_root=${HERDR_PLUGIN_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}
 state_dir=${HERDR_PLUGIN_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/herdr-pane-resurrect}
+
+herdr_config=${XDG_CONFIG_HOME:-$HOME/.config}/herdr
+# Without a socket there is no server to ask; herdr's default path is the fallback.
+socket=${HERDR_SOCKET_PATH:-$herdr_config/herdr.sock}
+
+# One state directory per herdr session (#4): herdr keys a plugin's state by plugin id alone, so every
+# session would share it. A named session's socket is <config>/sessions/<name>/herdr.sock (herdr 0.9.5
+# session.rs data_dir_for) and its state goes to sessions/<name>/; any other socket, a relocated
+# HERDR_SOCKET_PATH included, is the default session and keeps the directory it always had.
+[[ $socket =~ ^"$herdr_config"/sessions/([^/]+)/herdr\.sock$ ]] && state_dir+="/sessions/${BASH_REMATCH[1]}"
+# The one place the directory is made, for every script that sources this.
+[ -d "$state_dir" ] || mkdir -p "$state_dir" 2>/dev/null
+
 config_dir=${HERDR_PLUGIN_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/herdr-pane-resurrect}
 state_file="$state_dir/panes.json"
 # Present while a freshly started server waits for its restore; bin/autosave explains why.
@@ -60,9 +73,6 @@ def position($panes): . as $p | [$panes[] | select(.tab_id == $p.tab_id) | .pane
 '
 
 truthy() { case "$1" in true | 1 | yes | on) return 0 ;; *) return 1 ;; esac }
-
-# Without a socket there is no server to ask; herdr's default path is the fallback.
-socket=${HERDR_SOCKET_PATH:-$HOME/.config/herdr/herdr.sock}
 
 # herdr_request <json>: one raw socket API request, for the methods the CLI has no command for
 # (agent.view.*). The server answers with one line and closes the connection.
@@ -220,7 +230,6 @@ record_line() {
 # autosave tick that finds nothing new does not rewrite the file every interval.
 store() {
     local records=$1 file=${2:-$state_file} previous
-    mkdir -p "$state_dir" 2>/dev/null || return 1
     previous=$(cat "$file" 2>/dev/null)
     [ "$records" = "$previous" ] && return 2
     printf '%s\n' "$records" >"$file.tmp" && mv "$file.tmp" "$file"

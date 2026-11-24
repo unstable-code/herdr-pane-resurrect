@@ -88,6 +88,14 @@ does well.
   overwritten with a single stray `bash` before restore was ever pressed. The `[[startup]]` hook now
   puts the snapshot on hold; running **restore**, or a **save** you ask for (the way to say "I will
   not restore that one"), lifts it.
+- **Each herdr session keeps its own state.** herdr gives a plugin one state directory per plugin id,
+  shared by the default session and every `herdr --session <name>`, so a named session starting up
+  used to put the default session's snapshot on hold — and the sessions would also have shared one
+  autosave daemon, one snapshot and one agent order. The session is told by the socket a command
+  reaches its server through: a named session's is `<config>/sessions/<name>/herdr.sock`, and its
+  state goes to `sessions/<name>/` under the plugin's state directory. The default session keeps the
+  directory as it was, so its snapshot carries over an update; a socket moved elsewhere with
+  `HERDR_SOCKET_PATH` counts as the default session.
 
 ### Agent order (optional)
 
@@ -191,6 +199,7 @@ panes) plus `beta` and `gamma`, whose tabs are both unnamed and therefore both l
 | Server killed hard with its panes, then started again (plugin linked, `[[startup]]` hook live) | snapshot put on hold; a new command in a pane left it untouched across three ticks |
 | restore while on hold | hold lifted, autosave tracked the session again on its next tick |
 | save by hand while on hold | hold lifted |
+| A named session started next to the default one (`herdr --session prtest server`, herdr 0.9.5) | its own daemon, lock and pid under `sessions/prtest/`; the default session's snapshot unchanged (same md5) and no hold written. A save there wrote `sessions/prtest/panes.json`, and restore there replayed nothing from the default snapshot |
 | A real `nix-shell -p hello` in a pane (leader `bash --rcfile $TMPDIR/nix-shell-…/rc`) | not saved; `bash -c 'sleep 600 \| cat'` next to it still saved |
 | A snapshot from an older version holding that nix-shell record | skipped as *not replayable*, not typed into the pane |
 | `bash /nonexistent/deploy.sh` in the snapshot | typed, failed at once, reported as *exited right away* — `command(s): 1 restored, 0 already running, 1 skipped, 1 failed` |

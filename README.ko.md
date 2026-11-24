@@ -74,6 +74,12 @@ tmux-resurrect 중 herdr 에 없는 절반만 맡는다. herdr 이 이미 잘하
   기다리던 명령을 덮어쓴다. 실제로 그랬다: 컴포지터 크래시 뒤, restore 를 누르기도 전에 `ssh` 세 개의
   스냅샷이 떠돌이 `bash` 한 줄로 바뀌었다. 이제 `[[startup]]` 훅이 스냅샷을 보호 상태로 두고, **restore**
   를 실행하거나 **save 를 직접** 누르면(= "그건 복원하지 않겠다") 풀린다.
+- **herdr 세션마다 상태를 따로 둔다.** herdr 는 플러그인 상태 디렉터리를 플러그인 id 하나로만 정해서, 기본
+  세션과 모든 `herdr --session <이름>` 이 같은 디렉터리를 쓴다. 그래서 named session 이 뜨기만 해도 기본
+  세션의 스냅샷이 보호 상태가 됐고, 자동 저장 데몬·스냅샷·에이전트 순서도 한 벌을 나눠 썼다. 세션은 명령이
+  서버에 닿는 소켓으로 가른다 — named session 은 `<config>/sessions/<이름>/herdr.sock` 이고, 그 상태는
+  플러그인 상태 디렉터리 아래 `sessions/<이름>/` 에 둔다. 기본 세션은 디렉터리를 그대로 써서 업데이트 전의
+  스냅샷을 이어 받는다. `HERDR_SOCKET_PATH` 로 다른 곳에 둔 소켓은 기본 세션으로 친다.
 
 ### 에이전트 순서 (선택)
 
@@ -172,6 +178,7 @@ agent_order = false  # 재시작해도 에이전트 사이드바 순서 유지 (
 | 서버를 페인째 강제 종료 후 재기동 (플러그인 link, `[[startup]]` 훅 동작) | 스냅샷이 보호 상태가 됨. 페인에서 새 명령이 돌아도 세 틱 동안 그대로 |
 | 보호 중 restore | 보호 해제, 다음 틱부터 자동 저장 재개 |
 | 보호 중 save 직접 실행 | 보호 해제 |
+| 기본 세션 옆에 named session 기동 (`herdr --session prtest server`, herdr 0.9.5) | `sessions/prtest/` 아래 자기 데몬·락·pid. 기본 세션 스냅샷은 그대로(md5 동일)이고 보호 상태도 생기지 않음. 그쪽에서 save 하면 `sessions/prtest/panes.json` 에 쓰고, restore 는 기본 스냅샷에서 아무것도 재생하지 않음 |
 | 페인에서 실제 `nix-shell -p hello` (리더 `bash --rcfile $TMPDIR/nix-shell-…/rc`) | 저장 안 함. 옆 페인의 `bash -c 'sleep 600 \| cat'` 은 그대로 저장 |
 | 그 nix-shell 기록을 담은 이전 버전 스냅샷 | *not replayable* 로 건너뜀, 페인에 입력하지 않음 |
 | 스냅샷의 `bash /nonexistent/deploy.sh` | 입력 후 즉시 실패, *exited right away* 로 보고 — `command(s): 1 restored, 0 already running, 1 skipped, 1 failed` |
