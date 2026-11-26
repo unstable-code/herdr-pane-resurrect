@@ -201,6 +201,7 @@ agent_order = false  # 재시작해도 에이전트 사이드바 순서 유지 (
 | restore 재실행 | `agent(s): 0 restored, 2 already running`, 세션 id 로 판정 |
 | 실제 Claude Code 2.1.278 파일에 대고 | 열려 있던 대화 8개 모두 세션 id 로 풀림. 틀린 `procStart`·죽은 pid·잘못된 id 는 모두 거부 |
 | `HIST_IGNORE_SPACE` 를 켠 zsh 페인에 `sleep 500` 복원 | 복원돼 돌고 있는데 히스토리 파일은 비어 있음. 직후 직접 입력한 `echo typed-by-hand` 는 그대로 기록 — 필터일 뿐 히스토리를 죽이지 않는다 |
+| 여러 줄 스크립트(줄바꿈·탭·따옴표)를 인자 하나로 받는 `watch -n 1` 을 다른 디렉터리의 페인에 복원 (named session, herdr 0.9.5) | 한 줄로 입력돼 레코드와 같은 argv 로 실행, 스크립트도 의도대로 파일을 씀. 다시 restore 하면 `1 already running` |
 
 에이전트 순서는 격리된 herdr 0.9.5 서버에서, 한 탭의 페인 셋을 `herdr pane report-agent` 로 에이전트로
 만들어 확인했다.

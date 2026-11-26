@@ -224,6 +224,7 @@ panes) plus `beta` and `gamma`, whose tabs are both unnamed and therefore both l
 | restore again | `agent(s): 0 restored, 2 already running`, judged by session id |
 | Against the live Claude Code 2.1.278 files | all eight open conversations resolved to their session ids; a wrong `procStart`, a dead pid and a malformed id were all refused |
 | `sleep 500` restored into a zsh pane with `HIST_IGNORE_SPACE` set | running again, and the history file empty; an `echo typed-by-hand` entered right afterwards was recorded as usual — a filter, not a broken history |
+| `watch -n 1` with a multi-line script as its one argument (newlines, a tab, quotes), restored into a pane in another directory (named session, herdr 0.9.5) | typed on one line and running with the argv identical to the record; the script wrote what it should. Restore again: `1 already running` |
 
 Agent order was checked on an isolated herdr 0.9.5 server, with three panes in one tab made into
 agents by `herdr pane report-agent`:

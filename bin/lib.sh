@@ -313,12 +313,13 @@ collect() {
         | sort_by([.ws, .tab, .idx])'
 }
 
-# Human-readable form of a record, used by both the save listing and the restore listing.
+# Human-readable form of a record, used by both the save listing and the restore listing. Kept to
+# one line: a line break inside an argument (a script handed to watch) is shown as ↵.
 record_line() {
     jq -r '
         (if (.ws_label // "") == "" then .ws else .ws_label end) as $ws
         | (if (.tab_label // "") == "" then (.tab | tostring) else .tab_label end) as $tab
-        | "\($ws)/\($tab)  \(.argv | join(" "))"' <<<"$1"
+        | "\($ws)/\($tab)  \(.argv | join(" ") | gsub("[\n\r]"; "↵"))"' <<<"$1"
 }
 
 # store <records> [file]: write the snapshot (or another state file) only when it differs, so an

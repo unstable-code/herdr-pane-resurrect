@@ -146,26 +146,31 @@ for ((i = 0; i < total; i++)); do
     fi
 
     # `herdr pane run` types the command into the pane's shell, so every word has to survive one
-    # shell round trip: printf %q is what keeps spaces, pipes and quotes from being re-interpreted
-    # there. Without it `watch 'df -h | grep -v tmpfs'` would be split at the pipe.
-    quoted=$(jq -r '.argv[]' <<<"$record" | while IFS= read -r word; do printf '%q ' "$word"; done)
+    # shell round trip: printf %q keeps `watch 'df -h | grep -v tmpfs'` from being split at the pipe,
+    # and writes a newline as $'\n', so a script handed to watch whole stays one word on one line.
+    # The words are read NUL-separated: one per line would cut such a word apart (#6).
+    mapfile -d '' -t words < <(jq -j '.argv[] | . + "\u0000"' <<<"$record")
+    typed=()
+    for word in "${words[@]}"; do
+        printf -v word '%q' "$word"
+        typed+=("$word")
+    done
 
     # The pane comes back in the directory herdr restored, which is the pane's own cwd rather than
     # the directory the command was started from. Move first when they differ.
     pane_cwd=$(jq -r --arg p "$idle_pane" \
         '.result.panes[] | select(.pane_id == $p) | .foreground_cwd // .cwd // ""' <<<"$panes")
     if [ -n "$want_cwd" ] && [ "$want_cwd" != "$pane_cwd" ]; then
-        quoted="cd $(printf '%q' "$want_cwd") && $quoted"
+        printf -v word '%q' "$want_cwd"
+        typed=(cd "$word" '&&' "${typed[@]}")
     fi
 
     # The leading ' ' keeps the replayed command out of the shell's history, where it would otherwise
     # pile up as lines nobody typed - `claude --resume <uuid>` worst of all, since that uuid is noise
     # no one will ever search for. Both zsh (HIST_IGNORE_SPACE) and bash (HISTCONTROL=ignorespace)
     # drop a line starting with a space; a shell without the option records the command as before, so
-    # this costs nothing where it does not help. It is a separate argument rather than a space glued
-    # onto the first word because $quoted is expanded unquoted below, and word splitting would eat it.
-    # shellcheck disable=SC2086  # already escaped above; it has to reach herdr as separate words
-    if "$herdr" pane run "$idle_pane" ' ' $quoted >/dev/null 2>&1; then
+    # this costs nothing where it does not help.
+    if "$herdr" pane run "$idle_pane" ' ' "${typed[@]}" >/dev/null 2>&1; then
         used="$used $idle_pane"
         launched+=("$idle_pane"$'\t'"$kind"$'\t'"$label")
     else
