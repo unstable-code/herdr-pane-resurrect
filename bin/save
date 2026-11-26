@@ -28,7 +28,7 @@ records=$(collect) || {
 
 # Claude conversations are counted apart from commands: they are a different kind of thing to
 # bring back, and lumping them together hides how many of each the snapshot holds.
-agents=$(jq '[.[] | select(.argv[0:2] == ["claude", "--resume"])] | length' <<<"$records")
+agents=$(jq "$record_jq"'[.[] | select(is_agent)] | length' <<<"$records")
 commands=$(($(jq 'length' <<<"$records") - agents))
 summary="$agents agent(s) and $commands command(s)"
 

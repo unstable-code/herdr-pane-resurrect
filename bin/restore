@@ -31,7 +31,6 @@ workspaces=$("$herdr" workspace list 2>/dev/null) || workspaces=""
     exit 1
 }
 
-total=$(jq 'length' "$state_file" 2>/dev/null) || total=0
 used=""
 # Counted per kind: a Claude conversation (agent) and a command are different things to bring back,
 # and one total hides how many of each came back.
@@ -39,23 +38,18 @@ declare -A started=([agent]=0 [command]=0) running=([agent]=0 [command]=0)
 declare -A skipped=([agent]=0 [command]=0) failed=([agent]=0 [command]=0)
 launched=()
 
-for ((i = 0; i < total; i++)); do
-    record=$(jq -c ".[$i]" "$state_file")
-    want_ws=$(jq -r '.ws' <<<"$record")
-    want_ws_label=$(jq -r '.ws_label // ""' <<<"$record")
-    want_tab=$(jq -r '.tab' <<<"$record")
-    want_tab_label=$(jq -r '.tab_label // ""' <<<"$record")
-    want_idx=$(jq -r '.idx // 0' <<<"$record")
-    want_cwd=$(jq -r '.cwd // ""' <<<"$record")
-    want_argv=$(jq -c '.argv' <<<"$record")
-    label=$(record_line "$record")
-    kind="command"
-    [ "$(jq -r '.argv[0:2] | join(" ")' <<<"$record")" = "claude --resume" ] && kind="agent"
+# Conversations already open anywhere, gathered once: each check walks every Claude session file.
+live_sessions=" $(claude_live_sessions | tr '\n' ' ') "
 
+# Every record is read in one jq pass, one line each, with its workspace and tab already resolved.
+# Fields are separated by \x1f, not a tab: a tab is IFS whitespace, so an empty field (a workspace
+# with no label) would vanish and shift the ones after it. argv stays JSON, so a newline in it does
+# not end the line. The loop reads from fd 3, leaving stdin alone for what it runs.
+while IFS=$'\x1f' read -r want_ws_label want_tab_label want_idx want_cwd want_argv kind replayable \
+    session ws_id tab_id label <&3; do
     # The same rule save applies, applied again here: a snapshot written before a rule existed
     # would otherwise keep replaying what the current version refuses to record.
-    if [ "$(jq -r --arg ephemeral "$ephemeral_dirs" --arg exclude "$exclude_names" \
-        "$replayable_jq"'.argv | replayable' <<<"$record")" != true ]; then
+    if [ "$replayable" != true ]; then
         echo "  skipped: not replayable (interactive shell or temporary path) — $label" >&2
         skipped[$kind]=$((${skipped[$kind]} + 1))
         continue
@@ -64,32 +58,18 @@ for ((i = 0; i < total; i++)); do
     # A Claude conversation that is already open anywhere - resumed by hand, from the picker, or by
     # herdr's own agent resume on a machine where that works - must not be opened a second time.
     # Checked by conversation id, because the argv of the running copy may be anything.
-    if [ "$kind" = agent ] && claude_session_live "$(jq -r '.argv[2]' <<<"$record")"; then
+    if [ "$kind" = agent ] && [[ $live_sessions == *" $session "* ]]; then
         echo "  already running  $label"
         running[$kind]=$((${running[$kind]} + 1))
         continue
     fi
 
-    # Resolve the workspace by id first — ids survive a restart (session.json keeps them) — and fall
-    # back to its name, which covers a workspace that was closed and made again.
-    ws_id=$(jq -r --arg w "$want_ws" --arg l "$want_ws_label" '
-        .result.workspaces as $all
-        | (($all | map(select(.workspace_id == $w)))
-            + ($all | map(select($l != "" and .label == $l))))
-        | first | .workspace_id // empty' <<<"$workspaces")
     if [ -z "$ws_id" ]; then
         echo "  skipped: no workspace $want_ws_label — $label" >&2
         skipped[$kind]=$((${skipped[$kind]} + 1))
         continue
     fi
 
-    # Inside the workspace, match the tab by its number (kept across restarts in
-    # public_tab_numbers), then by its name. Matching on the name alone is not enough: an unnamed
-    # tab's label is just its number, so every unnamed tab in the session looks alike.
-    tab_id=$(jq -r --arg w "$ws_id" --argjson n "$want_tab" --arg l "$want_tab_label" '
-        [.result.tabs[] | select(.workspace_id == $w)] as $t
-        | (($t | map(select(.number == $n))) + ($t | map(select($l != "" and .label == $l))))
-        | first | .tab_id // empty' <<<"$tabs")
     if [ -z "$tab_id" ]; then
         echo "  skipped: no tab $want_tab_label in $want_ws_label — $label" >&2
         skipped[$kind]=$((${skipped[$kind]} + 1))
@@ -99,28 +79,18 @@ for ((i = 0; i < total; i++)); do
     # Candidates: the pane that held this command, then a pane sitting in the same directory, then
     # the nearest one. Pane ids are handed out afresh on restart, so position is what is left to
     # match on — and a layout edited since the save should still land close to where it belongs.
-    candidates=$(jq -r --arg t "$tab_id" --arg c "$want_cwd" --argjson w "$want_idx" '
-        [.result.panes[] | select(.tab_id == $t)]
-        | to_entries
-        | sort_by([(.key != $w), (.value.foreground_cwd != $c and .value.cwd != $c),
-                   (if .key - $w < 0 then $w - .key else .key - $w end)])
-        | .[].value.pane_id' <<<"$panes")
-
     claimed=""
     idle_pane=""
-    for pane_id in $candidates; do
+    idle_cwd=""
+    while IFS=$'\x1f' read -r pane_id cwd <&4; do
         case " $used " in *" $pane_id "*) continue ;; esac
         info=$("$herdr" pane process-info --pane "$pane_id" 2>/dev/null) || continue
-        # Same leader rule as the save side: the process whose pid is the foreground group id.
-        leader_argv=$(jq -c '.result.process_info
-            | .foreground_process_group_id as $g
-            | (.foreground_processes // []) as $fg
-            | (($fg | map(select(.pid == $g)) | first) // ($fg | first))
-            | .argv // null' <<<"$info")
-        IFS=$'\t' read -r leader shell < <(jq -r '.result.process_info
-            | "\(.foreground_process_group_id // "")\t\(.shell_pid // "")"' <<<"$info")
+        # The same leader save records (leader_jq).
+        IFS=$'\x1f' read -r leader shell leader_argv < <(jq -r "$leader_jq"'.result.process_info
+            | [.foreground_process_group_id // "", .shell_pid // "", (leader | .argv // null | tojson)]
+            | map(tostring) | join("\u001f")' <<<"$info")
         if [ "$leader" = "$shell" ]; then
-            [ -z "$idle_pane" ] && idle_pane=$pane_id
+            [ -z "$idle_pane" ] && idle_pane=$pane_id idle_cwd=$cwd
         elif [ "$leader_argv" = "$want_argv" ] ||
             [ "$(typed_argv "$leader" "$shell")" = "$want_argv" ]; then
             # Compared as whole argv, not by program name: `watch w` and
@@ -130,7 +100,12 @@ for ((i = 0; i < total; i++)); do
             claimed=$pane_id
             break
         fi
-    done
+    done 4< <(jq -r --arg t "$tab_id" --arg c "$want_cwd" --argjson w "$want_idx" '
+        [.result.panes[] | select(.tab_id == $t)]
+        | to_entries
+        | sort_by([(.key != $w), (.value.foreground_cwd != $c and .value.cwd != $c),
+                   (if .key - $w < 0 then $w - .key else .key - $w end)])
+        | .[].value | [.pane_id, .foreground_cwd // .cwd // ""] | join("\u001f")' <<<"$panes")
 
     if [ -n "$claimed" ]; then
         echo "  already running  $label"
@@ -149,7 +124,7 @@ for ((i = 0; i < total; i++)); do
     # shell round trip: printf %q keeps `watch 'df -h | grep -v tmpfs'` from being split at the pipe,
     # and writes a newline as $'\n', so a script handed to watch whole stays one word on one line.
     # The words are read NUL-separated: one per line would cut such a word apart (#6).
-    mapfile -d '' -t words < <(jq -j '.argv[] | . + "\u0000"' <<<"$record")
+    mapfile -d '' -t words < <(jq -j '.[] | . + "\u0000"' <<<"$want_argv")
     typed=()
     for word in "${words[@]}"; do
         printf -v word '%q' "$word"
@@ -158,9 +133,7 @@ for ((i = 0; i < total; i++)); do
 
     # The pane comes back in the directory herdr restored, which is the pane's own cwd rather than
     # the directory the command was started from. Move first when they differ.
-    pane_cwd=$(jq -r --arg p "$idle_pane" \
-        '.result.panes[] | select(.pane_id == $p) | .foreground_cwd // .cwd // ""' <<<"$panes")
-    if [ -n "$want_cwd" ] && [ "$want_cwd" != "$pane_cwd" ]; then
+    if [ -n "$want_cwd" ] && [ "$want_cwd" != "$idle_cwd" ]; then
         printf -v word '%q' "$want_cwd"
         typed=(cd "$word" '&&' "${typed[@]}")
     fi
@@ -177,7 +150,24 @@ for ((i = 0; i < total; i++)); do
         echo "  failed  $label" >&2
         failed[$kind]=$((${failed[$kind]} + 1))
     fi
-done
+done 3< <(jq -r --arg ephemeral "$ephemeral_dirs" --arg exclude "$exclude_names" \
+    --argjson workspaces "$workspaces" --argjson tabs "$tabs" "$replayable_jq$record_jq"'
+    .[]
+    # The workspace by id first — ids survive a restart (session.json keeps them) — then by its name,
+    # which covers a workspace that was closed and made again.
+    | . as $r
+    | ($workspaces.result.workspaces
+        | map(select(.workspace_id == $r.ws)) + map(select(($r.ws_label // "") != "" and .label == $r.ws_label))
+        | first | .workspace_id // "") as $ws_id
+    # Inside it, the tab by its number (kept across restarts in public_tab_numbers), then by its name.
+    # The name alone is not enough: an unnamed tab is labelled with its number, so they all look alike.
+    | ([$tabs.result.tabs[] | select(.workspace_id == $ws_id)]
+        | map(select(.number == $r.tab)) + map(select(($r.tab_label // "") != "" and .label == $r.tab_label))
+        | first | .tab_id // "") as $tab_id
+    | [.ws_label // "", .tab_label // "", .idx // 0, .cwd // "", (.argv | tojson),
+       (if is_agent then "agent" else "command" end), (.argv | replayable), .argv[2] // "",
+       $ws_id, $tab_id, record_line]
+    | map(tostring) | join("\u001f")' "$state_file" 2>/dev/null)
 
 # `pane run` succeeding only means the text was typed. Whether the command then kept running is a
 # separate question, and the one that matters: a command whose file is gone (a script deleted since,
@@ -192,8 +182,8 @@ if [ "${#launched[@]}" -gt 0 ]; then
         kind=${rest%%$'\t'*}
         label=${rest#*$'\t'}
         info=$("$herdr" pane process-info --pane "$pane_id" 2>/dev/null) || info=""
-        if [ -n "$info" ] && [ "$(jq -r '.result.process_info.foreground_process_group_id' <<<"$info")" != \
-            "$(jq -r '.result.process_info.shell_pid' <<<"$info")" ]; then
+        if [ -n "$info" ] && [ "$(jq '.result.process_info
+            | .foreground_process_group_id != .shell_pid' <<<"$info")" = true ]; then
             echo "  restored  $label"
             started[$kind]=$((${started[$kind]} + 1))
         else

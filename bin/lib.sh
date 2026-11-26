@@ -72,6 +72,17 @@ position_jq='
 def position($panes): . as $p | [$panes[] | select(.tab_id == $p.tab_id) | .pane_id] | index($p.pane_id) // 0;
 '
 
+# The command a pane is running, out of its process info: the process whose pid is the foreground
+# group id. The other members are its children (a pipeline, or watch running its argument through a
+# shell); restoring the leader replays the whole thing, restoring a child would replay a fragment.
+# Save records it and restore compares against it, so the two must pick the same process.
+# shellcheck disable=SC2016  # jq variables
+leader_jq='
+def leader:
+    .foreground_process_group_id as $g | (.foreground_processes // []) as $fg
+    | ($fg | map(select(.pid == $g)) | first) // ($fg | first);
+'
+
 truthy() { case "$1" in true | 1 | yes | on) return 0 ;; *) return 1 ;; esac }
 
 # herdr_request <json>: one raw socket API request, for the methods the CLI has no command for
@@ -121,25 +132,23 @@ claude_session_of() {
     # shellcheck disable=SC2086  # split into fields on purpose
     set -- ${stat##*") "}
     started=${20:-}
-    recorded=$(jq -r '.procStart // empty' "$file" 2>/dev/null)
-    [ -n "$started" ] && [ "$started" = "$recorded" ] || return 1
-    id=$(jq -r '.sessionId // empty' "$file" 2>/dev/null)
-    case "$id" in
+    IFS=$'\x1f' read -r recorded id < <(jq -r '"\(.procStart // "")\u001f\(.sessionId // "")"' "$file" 2>/dev/null)
+    [ -n "$started" ] && [ "$started" = "${recorded:-}" ] || return 1
+    case "${id:-}" in
         ????????-????-????-????-????????????) printf '%s\n' "$id" ;;
         *) return 1 ;;
     esac
 }
 
-# claude_session_live <id>: whether some running Claude process, in any pane or none, already has
-# this conversation open. Restore checks this rather than comparing argv, which would miss the same
-# conversation opened as `claude -r <id>` or from the picker.
-claude_session_live() {
+# claude_live_sessions: the conversation ids every running Claude process, in any pane or none, has
+# open, one per line. Restore checks a record against these rather than comparing argv, which would
+# miss the same conversation opened as `claude -r <id>` or from the picker.
+claude_live_sessions() {
     local file
     for file in "$claude_dir"/sessions/*.json; do
         [ -e "$file" ] || continue
-        [ "$(claude_session_of "$(basename "$file" .json)")" = "$1" ] && return 0
+        claude_session_of "$(basename "$file" .json)"
     done
-    return 1
 }
 
 # typed_argv <pid> <shell pid>: the command as it was typed, when <pid> was started through a nix
@@ -274,17 +283,13 @@ collect() {
         --argjson procs "$procs" \
         --arg exclude "$exclude_names" \
         --arg ephemeral "$ephemeral_dirs" \
-        --arg root "$plugin_root" "$replayable_jq$position_jq"'
+        --arg root "$plugin_root" "$replayable_jq$position_jq$leader_jq"'
         ($panes | map({key: .pane_id, value: .}) | from_entries) as $pane_by_id
         | ($tabs | map({key: .tab_id, value: .}) | from_entries) as $tab_by_id
         | ($workspaces | map({key: .workspace_id, value: .}) | from_entries) as $ws_by_id
         | [ $procs[]
             | . as $p
-            # The group leader is the command that was typed; the other members are its children
-            # (a pipeline, or watch running its argument through a shell). Restoring the leader
-            # replays the whole thing, restoring a child would replay a fragment of it.
-            | ($p.foreground_processes // []) as $fg
-            | (($fg | map(select(.pid == $p.foreground_process_group_id)) | first) // ($fg | first)) as $leader
+            | ($p | leader) as $leader  # the command that was typed (see leader_jq)
             | select($leader != null and ($leader.argv | type) == "array" and ($leader.argv | length) > 0)
             # The foreground process group being the shell itself means the pane sits at a prompt.
             | select($p.foreground_process_group_id != $p.shell_pid)
@@ -313,14 +318,18 @@ collect() {
         | sort_by([.ws, .tab, .idx])'
 }
 
-# Human-readable form of a record, used by both the save listing and the restore listing. Kept to
-# one line: a line break inside an argument (a script handed to watch) is shown as ↵.
-record_line() {
-    jq -r '
-        (if (.ws_label // "") == "" then .ws else .ws_label end) as $ws
-        | (if (.tab_label // "") == "" then (.tab | tostring) else .tab_label end) as $tab
-        | "\($ws)/\($tab)  \(.argv | join(" ") | gsub("[\n\r]"; "↵"))"' <<<"$1"
-}
+# What save and restore both ask of a record. is_agent: a Claude conversation, as collect writes it.
+# record_line: its human-readable form for the save and restore listings, kept to one line - a line
+# break inside an argument (a script handed to watch) is shown as ↵.
+# shellcheck disable=SC2016  # jq variables
+record_jq='
+def is_agent: .argv[0:2] == ["claude", "--resume"];
+def record_line:
+    (if (.ws_label // "") == "" then .ws else .ws_label end) as $ws
+    | (if (.tab_label // "") == "" then (.tab | tostring) else .tab_label end) as $tab
+    | "\($ws)/\($tab)  \(.argv | join(" ") | gsub("[\n\r]"; "↵"))";
+'
+record_line() { jq -r "$record_jq"'record_line' <<<"$1"; }
 
 # store <records> [file]: write the snapshot (or another state file) only when it differs, so an
 # autosave tick that finds nothing new does not rewrite the file every interval.
